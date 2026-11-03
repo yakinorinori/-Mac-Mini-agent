@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from openai import OpenAI
 from agent.models import Command, Plan, Step
-from config import OPENAI_API_KEY, OLLAMA_BASE_URL, MODEL_ROUTER
+from config import OLLAMA_BASE_URL, MODEL_ROUTER
 
 
 # 難易度の定義
@@ -27,7 +27,6 @@ class Planner:
         self.context = context
         self.registry = registry
         self._ollama_client = None
-        self._openai_client = None
 
     # ── クライアント ──────────────────────────────
 
@@ -39,18 +38,6 @@ class Planner:
                 api_key="ollama",
             )
         return self._ollama_client
-
-    @property
-    def openai_client(self):
-        if self._openai_client is None:
-            self._openai_client = OpenAI(api_key=OPENAI_API_KEY)
-        return self._openai_client
-
-    def _get_client(self, model: str):
-        """モデル名からクライアントを選択"""
-        if model.startswith("gpt-"):
-            return self.openai_client
-        return self.ollama_client
 
     # ── 難易度分類 ────────────────────────────────
 
@@ -143,9 +130,7 @@ easy / medium / hard / api / impossible"""
 実行できるツールがない場合は null を返してください。
 JSONのみ出力してください。"""
 
-        client = self._get_client(model)
-
-        response = client.chat.completions.create(
+        response = self.ollama_client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
@@ -214,6 +199,15 @@ JSONのみ出力してください。"""
             return Plan(
                 steps=[],
                 message="申し訳ありません、その操作はできません 🙏",
+                delay=None,
+            )
+
+        # 外部APIへの送信は承認フローができるまで行わない
+        if difficulty == "api":
+            print("[Planner] api → 外部送信せず対応不可として返す")
+            return Plan(
+                steps=[],
+                message="この依頼はローカルモデルでは対応できないため、実行しませんでした(外部APIには送信していません)。",
                 delay=None,
             )
 

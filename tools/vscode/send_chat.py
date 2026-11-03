@@ -1,5 +1,6 @@
 import re
-import subprocess
+
+from agent.process import run_command
 
 _QUOTE_PATTERNS = [
     r'"([^"]+)"',
@@ -61,7 +62,7 @@ def send_to_vscode_chat(message: str):
     end tell
     '''
 
-    subprocess.run(["osascript", "-e", script])
+    run_command(["osascript", "-e", script])
 
 
 def open_dev_mode():
@@ -81,7 +82,7 @@ def open_dev_mode():
     end tell
     '''
 
-    subprocess.run(["osascript", "-e", script])
+    run_command(["osascript", "-e", script])
 
 
 def type_into_vscode_chat(text: str):
@@ -98,7 +99,7 @@ def type_into_vscode_chat(text: str):
     end tell
     '''
 
-    subprocess.run(["osascript", "-e", script])
+    run_command(["osascript", "-e", script])
 
 
 def submit_vscode_chat():
@@ -113,4 +114,4 @@ def submit_vscode_chat():
     end tell
     '''
 
-    subprocess.run(["osascript", "-e", script])
+    run_command(["osascript", "-e", script])

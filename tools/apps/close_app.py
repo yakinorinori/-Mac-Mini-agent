@@ -1,6 +1,6 @@
-import subprocess
+from agent.process import run_command
 
 
 def close_app(name):
 
-    subprocess.run(["pkill", "-a", "-i", name])
+    run_command(["pkill", "-a", "-i", name])

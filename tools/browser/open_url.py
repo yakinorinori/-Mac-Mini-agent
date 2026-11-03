@@ -1,6 +1,6 @@
-import subprocess
+from agent.process import run_command
 
 
 def open_url(url):
 
-    subprocess.run(["open", url])
+    run_command(["open", url])

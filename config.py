@@ -2,10 +2,29 @@ import os
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# LLM設定: "ollama" or "openai"
-LLM_PROVIDER = "ollama"
+def parse_allowed_user_ids(raw: str) -> frozenset[int]:
+    """カンマ区切りのTelegramユーザーIDを解釈する。不正な値は黙って無視せず例外にする。"""
+
+    ids = set()
+
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdecimal() or int(part) <= 0:
+            raise ValueError(
+                "ALLOWED_TELEGRAM_USER_IDS には正の整数のIDをカンマ区切りで指定してください"
+            )
+        ids.add(int(part))
+
+    return frozenset(ids)
+
+
+# Botの操作を許可するTelegramユーザーID(例: "123456789" または "123,456")
+ALLOWED_TELEGRAM_USER_IDS = parse_allowed_user_ids(
+    os.getenv("ALLOWED_TELEGRAM_USER_IDS", "")
+)
 
 # Ollama設定
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
@@ -22,7 +41,7 @@ MODEL_ROUTER = {
     "easy":       "qwen2.5:3b",       # アプリ起動・ブックマークなど単純操作
     "medium":     "qwen2.5:7b",       # 検索・メール・カレンダーなど
     "hard":       "deepseek-r1:7b",   # 複雑な推論・多ステップタスク
-    "api":        "gpt-4o-mini",      # ローカルで対応不可 → OpenAI API
+    "api":        None,               # 外部送信は承認フロー実装まで行わない
     "impossible": None,               # どのモデルでも対応不可 → 「できません」
 }
 

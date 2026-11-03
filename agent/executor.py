@@ -33,11 +33,16 @@ class ToolManager:
 
         results = []
 
-        for step in plan.steps:
+        for index, step in enumerate(plan.steps, start=1):
             try:
                 result = self.execute(step)
                 results.append((step, result))
             except Exception as e:
-                raise RuntimeError(f"ステップ{step.tool}の実行に失敗しました: {e}") from e
+                # 先行ステップの副作用(送信済みメールなど)を利用者が把握できるようにする
+                completed = "、".join(done.tool for done, _ in results) or "なし"
+                raise RuntimeError(
+                    f"{index}/{len(plan.steps)}ステップ目({step.tool})の実行に失敗しました: {e}"
+                    f"(完了済み: {completed})"
+                ) from e
 
         return results

@@ -1,3 +1,5 @@
+import asyncio
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -6,7 +8,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import TOKEN
+from config import ALLOWED_TELEGRAM_USER_IDS, TOKEN
 from agent.agent import Agent
 from agent.executor import ToolManager
 from context import Context
@@ -19,16 +21,52 @@ agent = Agent(app_context, registry=tm.registry)
 scheduler = Scheduler()
 
 
-async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def build_message_filter(allowed_user_ids):
+    """許可ユーザーからの個人チャットの新規テキストだけを受け付けるフィルタを作る。"""
 
-    text = update.message.text
+    return (
+        filters.UpdateType.MESSAGE
+        & filters.ChatType.PRIVATE
+        & filters.TEXT
+        & filters.User(user_id=allowed_user_ids)
+    )
 
-    print("受信:", text)
+
+async def send_results(update: Update, plan, results):
+    """実行結果をユーザーへ返す。take_screenshotの結果(画像パス)は画像として送信する。"""
+
+    for step, result in results:
+        if step.tool == "take_screenshot" and result:
+            with open(result, "rb") as photo:
+                await update.message.reply_photo(photo)
+
+    await update.message.reply_text(plan.message or "完了しました。")
+
+
+def run_delayed(plan, update: Update, loop):
+    """Schedulerのスレッドで実行し、成否をbotのイベントループ経由で通知する。"""
+
+    try:
+        results = tm.execute_plan(plan)
+        notification = send_results(update, plan, results)
+    except Exception as e:
+        print("エラー:", e)
+        notification = update.message.reply_text(f"⚠️ 遅延実行でエラーが発生しました: {e}")
+
+    future = asyncio.run_coroutine_threadsafe(notification, loop)
+
+    try:
+        future.result(timeout=60)
+    except Exception as e:
+        print("通知エラー:", e)
+
+
+async def handle_text(update: Update, text: str):
 
     # ── 開発モード ──────────────────────────────
     if text.strip() == "開発モード":
-        app_context.dev_mode = True
         open_dev_mode()
+        app_context.dev_mode = True
         await update.message.reply_text(
             "🛠 開発モードを開始しました。送るトークがそのままVS Codeのチャットに入力されます。"
             "「送信」で送信、「終了」でモードを終了します。"
@@ -61,43 +99,57 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if plan.steps:
         await update.message.reply_text(plan.describe())
 
-    try:
-        if plan.delay:
-
-            scheduler.schedule(
-                plan.delay,
-                lambda: tm.execute_plan(plan)
-            )
-
-        else:
-
-            results = tm.execute_plan(plan)
-
-            # take_screenshotの結果(画像パス)はTelegramへ画像として送信する
-            for step, result in results:
-                if step.tool == "take_screenshot" and result:
-                    with open(result, "rb") as photo:
-                        await update.message.reply_photo(photo)
-
+    if plan.delay:
+        loop = asyncio.get_running_loop()
+        scheduler.schedule(
+            plan.delay,
+            lambda: run_delayed(plan, update, loop)
+        )
+        # この時点では未実行なので、LLMが用意した完了文面は返さない
         await update.message.reply_text(
-            plan.message
+            f"⏰ {plan.delay}秒後に実行します。結果はあとで通知します。"
         )
-        app_context.add(
-            text,
-            plan
-        )
+    else:
+        results = tm.execute_plan(plan)
+        await send_results(update, plan, results)
 
+    app_context.add(
+        text,
+        plan
+    )
+
+
+async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    text = update.message.text
+
+    print("受信:", text)
+
+    try:
+        await handle_text(update, text)
     except Exception as e:
         print("エラー:", e)
-        await update.message.reply_text("エラーが発生しました")
+        await update.message.reply_text(f"⚠️ エラーが発生しました: {e}")
 
 
-app = ApplicationBuilder().token(TOKEN).build()
+def main():
 
-app.add_handler(
-    MessageHandler(filters.TEXT, receive)
-)
+    if not ALLOWED_TELEGRAM_USER_IDS:
+        raise SystemExit(
+            "ALLOWED_TELEGRAM_USER_IDS が未設定のため起動しません。"
+            "操作を許可するTelegramユーザーIDを設定してください。"
+        )
 
-print("Bot起動")
+    app = ApplicationBuilder().token(TOKEN).build()
 
-app.run_polling()
+    app.add_handler(
+        MessageHandler(build_message_filter(ALLOWED_TELEGRAM_USER_IDS), receive)
+    )
+
+    print("Bot起動")
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()

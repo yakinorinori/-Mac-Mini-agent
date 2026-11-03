@@ -1,4 +1,19 @@
-import subprocess
+from datetime import datetime
+
+from agent.process import run_applescript
+
+_ADD_EVENT_SCRIPT = '''
+on run argv
+    set eventTitle to item 1 of argv
+    set startDate to date (item 2 of argv)
+
+    tell application "Calendar"
+        tell (first calendar whose writable is true)
+            make new event with properties {summary:eventTitle, start date:startDate}
+        end tell
+    end tell
+end run
+'''
 
 
 def calendar_add(title: str, date: str, time: str = "09:00"):
@@ -10,12 +25,9 @@ def calendar_add(title: str, date: str, time: str = "09:00"):
         time:  時刻 (例: "14:00")
     """
 
-    script = f'''
-    tell application "Calendar"
-        tell (first calendar whose writable is true)
-            make new event with properties {{summary:"{title}", start date:(date "{date} {time}:00")}}
-        end tell
-    end tell
-    '''
+    try:
+        datetime.strptime(f"{date} {time}", "%Y/%m/%d %H:%M")
+    except ValueError as e:
+        raise ValueError("日時は YYYY/MM/DD と HH:MM の形式で指定してください") from e
 
-    subprocess.run(["osascript", "-e", script])
+    run_applescript(_ADD_EVENT_SCRIPT, title, f"{date} {time}:00")

@@ -1,6 +1,7 @@
-import subprocess
 from datetime import datetime
 from pathlib import Path
+
+from agent.process import CommandError, run_command
 
 
 def take_screenshot():
@@ -11,6 +12,9 @@ def take_screenshot():
 
     filename = output_dir / f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
 
-    subprocess.run(["screencapture", "-x", str(filename)])
+    run_command(["screencapture", "-x", str(filename)])
+
+    if not filename.is_file():
+        raise CommandError("screencapture が画像を作成しませんでした")
 
     return str(filename)

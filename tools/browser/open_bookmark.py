@@ -1,4 +1,4 @@
-import subprocess
+from agent.process import run_command
 from config import BOOKMARKS
 
 
@@ -12,11 +12,11 @@ def open_bookmark(name: str):
     )
 
     if key is None:
-        print(f"[open_bookmark] ブックマークが見つかりません: {name}")
-        print(f"[open_bookmark] 利用可能: {list(BOOKMARKS.keys())}")
-        return
+        raise ValueError(
+            f"ブックマークが見つかりません: {name}(利用可能: {', '.join(BOOKMARKS)})"
+        )
 
     url = BOOKMARKS[key]
     print(f"[open_bookmark] {key} → {url}")
 
-    subprocess.run(["open", "-a", "Google Chrome", url])
+    run_command(["open", "-a", "Google Chrome", url])
