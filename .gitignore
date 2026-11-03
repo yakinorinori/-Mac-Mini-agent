@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+bot/debug/
+bot/logs/
+tools/screen/captures/
+
+.DS_Store

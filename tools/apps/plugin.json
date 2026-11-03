@@ -1,0 +1,14 @@
+{
+  "name": "open_app",
+  "description": "Macのアプリケーションを起動する。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "起動するアプリケーションの名前"
+      }
+    },
+    "required": ["name"]
+  }
+}

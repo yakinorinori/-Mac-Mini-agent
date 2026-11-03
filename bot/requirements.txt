@@ -1,0 +1,8 @@
+pyobjc-framework-Quartz
+pyobjc-framework-Cocoa
+pyobjc-framework-ApplicationServices
+opencv-python
+anthropic
+pyyaml
+pyautogui
+pytest

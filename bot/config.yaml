@@ -1,0 +1,59 @@
+# bot/config.yaml
+# 人間らしい自動操作Botの全設定。乱数レンジはすべてここで管理する。
+
+screen:
+  screencapture_path: "/usr/sbin/screencapture"
+  debug_dir: "bot/debug"
+
+vision:
+  provider: "claude"          # "claude" | "template" | "dummy"
+  claude:
+    api_key_env: "ANTHROPIC_API_KEY"
+    model: "claude-3-5-sonnet-20241022"
+    max_retries: 3
+    retry_wait_range: [0.8, 2.0]
+    min_confidence: 0.5
+  template:
+    match_threshold: 0.85
+
+mouse:
+  duration_base_per_1000px: 0.5     # 1000px移動あたりの基準秒数
+  duration_jitter_range: [0.3, 1.2] # 加算されるランダム秒数
+  bezier_control_jitter_px: [10, 60]
+  path_jitter_px: [0.5, 2.5]
+  overshoot_probability: 0.10
+  overshoot_extra_px_range: [8, 25]
+  pre_move_wait_range: [0.05, 0.4]
+  post_move_wait_range: [0.05, 0.4]
+  path_points: 24
+
+click:
+  bbox_ratio_range: [0.4, 0.8]     # 要素の幅高さに対する許容範囲の割合
+  inner_margin_ratio: 0.1          # 端を避けるための内側マージン
+  gaussian_sigma_ratio: 0.35       # 許容範囲に対するガウス分布のsigma比
+  mouse_down_up_ms_range: [50, 160]
+  double_click_interval_ms_range: [80, 220]
+
+typing:
+  base_wpm: 220
+  wpm_jitter_ratio: 0.25
+  think_pause_probability: 0.08
+  think_pause_range: [0.4, 1.6]
+  word_boundary_extra_range: [0.05, 0.25]
+  punctuation_extra_range: [0.1, 0.4]
+  ime_commit_pre_wait_range: [0.1, 0.3]
+  ime_commit_post_wait_range: [0.1, 0.35]
+  mistake:
+    notice_delay_chars_range: [1, 3]
+    types: ["adjacent_key", "swap", "omission"]
+
+safety:
+  emergency_hotkey: "esc_long_press"
+  esc_long_press_seconds: 1.0
+  corner_abort_margin_px: 5
+  expected_app_check: true
+
+planner:
+  default_seed: null   # nullならOS乱数から自動生成
+  plan_json_dir: "bot/logs/plans"
+  step_wait_range: [0.1, 0.5]

@@ -1,0 +1,5 @@
+{
+  "name": "vscode",
+  "description": "VS Code Copilot Chatへの遠隔指示送信",
+  "version": "1.0.0"
+}
