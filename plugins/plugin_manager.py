@@ -1,21 +1,22 @@
 import importlib
 from pathlib import Path
 
+TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
+
 
 class PluginManager:
 
-    def __init__(self, registry):
+    def __init__(self, registry, tools_dir=TOOLS_DIR):
 
         self.registry = registry
+        self.tools_dir = Path(tools_dir)
 
 
     def load_plugins(self):
 
-        tools_dir = Path("tools")
+        for plugin in sorted(self.tools_dir.iterdir()):
 
-        for plugin in tools_dir.iterdir():
-
-            if not plugin.is_dir():
+            if not (plugin / "register.py").is_file():
                 continue
 
             try:
@@ -27,12 +28,6 @@ class PluginManager:
                 module.register(self.registry)
 
                 print(f"[Plugin] {plugin.name} 読み込み成功")
-
-            except ModuleNotFoundError:
-
-                print(
-                    f"[Plugin] {plugin.name} に register.py がありません"
-                )
 
             except Exception as e:
 
