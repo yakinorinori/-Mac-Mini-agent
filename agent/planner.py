@@ -13,6 +13,19 @@ DIFFICULTY_LEVELS = ["easy", "medium", "hard", "api", "impossible"]
 # VS Code宛の引用符付き指示かどうかの判定用
 _VSCODE_KEYWORDS = ("vscode", "vs code", "visual studio code")
 _QUOTE_CHARS = re.compile(r'["\'「」“”‘’]')
+# 「〜を検索して」「〜を調べて」「検索 〜」のような明示的な検索指示
+_SEARCH_SUFFIX = re.compile(
+    r"^(?:(?:google|グーグル)\s*で\s*)?(?P<query>.+?)\s*"
+    r"(?:を|について|のこと|に関して)?\s*(?:(?:google|グーグル)\s*で\s*)?"
+    r"(?:検索|ググ|調べ)(?:って|して|する|て)?(?:ください|下さい|ほしい|欲しい)?\s*[。．！!]*$",
+    re.IGNORECASE,
+)
+_SEARCH_PREFIX = re.compile(r"^(?:検索|ググって|調べて)[\s　]+(?P<query>.+)$")
+# Mac内の情報を調べる依頼はWeb検索にしない
+_LOCAL_WORDS = (
+    "カレンダー", "予定", "メール", "ファイル", "フォルダ", "スクショ",
+    "スクリーンショット", "画面", "アプリ", "ログ", "コード", "vscode", "vs code",
+)
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
@@ -20,6 +33,20 @@ def _is_vscode_chat_request(text: str) -> bool:
     """「VS Codeに"..."を送って」のような指示かを判定する(引用符の中身をLLMに解釈させないため)。"""
     lowered = text.lower()
     return any(k in lowered for k in _VSCODE_KEYWORDS) and bool(_QUOTE_CHARS.search(text))
+
+
+def extract_search_query(text: str) -> str | None:
+    """明示的なWeb検索の指示なら検索語を返す。該当しなければ None を返す。"""
+
+    stripped = text.strip()
+    lowered = stripped.lower()
+
+    if any(word in lowered for word in _LOCAL_WORDS):
+        return None
+
+    match = _SEARCH_SUFFIX.match(stripped) or _SEARCH_PREFIX.match(stripped)
+
+    return match.group("query").strip() if match else None
 
 
 class Planner:
@@ -187,6 +214,24 @@ JSONのみ出力してください。"""
                 ],
                 message="VS Codeに指示を送信しました。",
                 delay=None,
+            )
+
+        # 明示的な検索指示はLLMを通さず、承認なしで実行する
+        query = extract_search_query(intent.text)
+
+        if query:
+            print("[Planner] 検索指示を検出 → google_searchへ直接ルーティング")
+            return Plan(
+                steps=[
+                    Step(
+                        tool="google_search",
+                        args={"query": query},
+                        reason="検索の指示があったため",
+                    )
+                ],
+                message=f"🔎 「{query}」を検索しました。",
+                delay=None,
+                preapproved=True,
             )
 
         tools_description = self._build_tools_description()

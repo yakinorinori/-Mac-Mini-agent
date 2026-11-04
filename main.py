@@ -52,6 +52,9 @@ async def send_results(message, plan, results):
     """実行結果をユーザーへ返す。take_screenshotの結果(画像パス)は画像として送信する。"""
 
     for step, result in results:
+        if step.tool == "google_search" and result:
+            await message.reply_text(result)
+
         if step.tool == "take_screenshot" and result:
             with open(result, "rb") as photo:
                 try:
