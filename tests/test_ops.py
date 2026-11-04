@@ -355,8 +355,8 @@ def test_other_user_cannot_approve(ops_env):
     query.message.reply_text.assert_not_called()
 
 
-@pytest.mark.parametrize("target, called", [("prod", True), ("ops", True)])
-def test_restart_valid_target(ops_env, target, called):
+@pytest.mark.parametrize("target", ["prod", "ops"])
+def test_restart_valid_target(ops_env, target):
     update = _update()
     asyncio.run(bot.request_restart(update, _context(target)))
     approve, _ = _buttons(update)
@@ -413,7 +413,10 @@ def test_every_command_requires_allowed_private_user(monkeypatch):
     app.bot._bot_user = TelegramUser(id=1, first_name="ops", is_bot=True, username="ops_test_bot")
     commands = [h for h in app.handlers[0] if isinstance(h, CommandHandler)]
     names = {name for h in commands for name in h.commands}
-    assert names == {"start", "help", "status", "logs", "stop_prod", "start_prod", "restart"}
+    assert names == {
+        "start", "help", "status", "logs", "stop_prod", "start_prod", "restart",
+        "deploy", "rollback", "deploy_staging", "stop_staging",
+    }
 
     def update_for(user_id, chat_type):
         from datetime import datetime, timezone
@@ -443,70 +446,105 @@ def test_ops_refuses_to_start_without_allowed_users(monkeypatch):
 
 # ── launchd設定 ──
 
-@pytest.mark.parametrize("target, arguments", [("prod", ["main.py"]), ("ops", ["-m", "ops.bot"])])
-def test_plist_contents(target, arguments, tmp_path):
+@pytest.mark.parametrize("target, directory, arguments", [
+    ("prod", "agent/prod", ["main.py"]),
+    ("staging", "agent/staging", ["main.py"]),
+    ("ops", "個人事業/repo", ["-m", "ops.bot"]),
+    ("runner", "個人事業/repo", ["-m", "ops.runner"]),
+])
+def test_plist_contents(target, directory, arguments, tmp_path):
     repo = tmp_path / "個人事業" / "repo"
-    data = plistlib.loads(install.render_plist(target, repo, tmp_path / "state"))
+    root = tmp_path / "agent"
+    data = plistlib.loads(install.render_plist(target, repo, root))
+    code = tmp_path / directory
     assert data["Label"] == f"com.agent.{target}"
-    assert data["ProgramArguments"] == [str(repo / ".venv/bin/python"), *arguments]
-    assert data["WorkingDirectory"] == str(repo)
+    assert data["ProgramArguments"] == [str(code / ".venv/bin/python"), *arguments]
+    assert data["WorkingDirectory"] == str(code)
     assert data["LimitLoadToSessionType"] == "Aqua"
-    assert data["KeepAlive"] is True
-    assert data["EnvironmentVariables"]["AGENT_ENV_FILE"] == str(tmp_path / "state" / f"{target}.env")
-    assert data["StandardOutPath"] == str(tmp_path / "state" / "logs" / f"{target}.log")
+    assert data["EnvironmentVariables"]["AGENT_NAME"] == target
+    assert data["StandardOutPath"] == str(root / "state" / "logs" / f"{target}.log")
+
+
+def test_service_keepalive_settings(tmp_path):
+    render = lambda target: plistlib.loads(install.render_plist(target, tmp_path, tmp_path))
+    assert render("prod")["KeepAlive"] is True
+    assert render("ops")["KeepAlive"] is True
+    assert "KeepAlive" not in render("staging")
+    runner = render("runner")
+    assert "KeepAlive" not in runner and "RunAtLoad" not in runner
+    assert runner["QueueDirectories"] == [str(tmp_path / "state" / "requests")]
+    assert runner["EnvironmentVariables"]["AGENT_ENV_FILE"] == str(tmp_path / "state" / "ops.env")
 
 
 def test_plist_contains_no_secret_values(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
     (state / "prod.env").write_text("TELEGRAM_BOT_TOKEN=secret-value")
-    assert b"secret-value" not in install.render_plist("prod", tmp_path, state)
+    assert b"secret-value" not in install.render_plist("prod", tmp_path, tmp_path)
 
 
 def _prepared(tmp_path, mode=0o600):
     repo = tmp_path / "repo"
     (repo / ".venv" / "bin").mkdir(parents=True)
     (repo / ".venv" / "bin" / "python").touch()
-    state = tmp_path / "state"
-    state.mkdir()
-    for target in system.LABELS:
-        env = state / f"{target}.env"
+    root = tmp_path / "agent"
+    (root / "state").mkdir(parents=True)
+    for target in ("prod", "ops"):
+        env = root / "state" / f"{target}.env"
         env.touch()
         env.chmod(mode)
-    return repo, state
+    return repo, root
 
 
 def test_install_stops_on_missing_env_file(tmp_path, fake_run, capsys):
-    repo, state = _prepared(tmp_path)
-    (state / "ops.env").unlink()
-    assert install.install(repo, state) == 1
+    repo, root = _prepared(tmp_path)
+    (root / "state" / "ops.env").unlink()
+    assert install.install(repo, root) == 1
     fake_run.assert_not_called()
     assert "ops.env" in capsys.readouterr().err
 
 
 def test_install_stops_on_open_env_permissions(tmp_path, fake_run):
-    repo, state = _prepared(tmp_path, mode=0o644)
-    assert install.install(repo, state) == 1
+    repo, root = _prepared(tmp_path, mode=0o644)
+    assert install.install(repo, root) == 1
     fake_run.assert_not_called()
 
 
-def test_install_registers_both_services(tmp_path, fake_run, monkeypatch):
-    repo, state = _prepared(tmp_path)
+def test_install_registers_services_and_keeps_staging_off(tmp_path, fake_run, monkeypatch):
+    repo, root = _prepared(tmp_path)
+    (root / "releases" / "a").mkdir(parents=True)
+    (root / "prod").symlink_to(root / "releases" / "a")
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-    assert install.install(repo, state) == 0
+    monkeypatch.setenv("AGENT_STATE_DIR", str(root / "state"))
+    assert install.install(repo, root) == 0
     commands = [c.args[0] for c in fake_run.call_args_list]
     bootstraps = [c for c in commands if c[:2] == ["launchctl", "bootstrap"]]
-    assert len(bootstraps) == 2
-    assert (tmp_path / "home/Library/LaunchAgents/com.agent.ops.plist").is_file()
-    assert (state / "logs").is_dir()
+    assert len(bootstraps) == 3
+    agents = tmp_path / "home/Library/LaunchAgents"
+    assert sorted(p.name for p in agents.iterdir()) == [
+        "com.agent.ops.plist", "com.agent.prod.plist", "com.agent.runner.plist",
+    ]
+    assert (root / "state" / "com.agent.staging.plist").is_file()
+    assert (root / "state" / "requests").stat().st_mode & 0o077 == 0
+
+
+def test_install_creates_first_release_when_prod_is_missing(tmp_path, fake_run, monkeypatch):
+    repo, root = _prepared(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("AGENT_STATE_DIR", str(root / "state"))
+    initialize = MagicMock(return_value="a" * 40)
+    monkeypatch.setattr(install.Deployer, "initialize", initialize)
+    assert install.install(repo, root, ref="feat/x") == 0
+    initialize.assert_called_once_with("feat/x")
 
 
 def test_dry_run_changes_nothing(tmp_path, fake_run, monkeypatch, capsys):
-    repo, state = _prepared(tmp_path)
+    repo, root = _prepared(tmp_path)
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-    assert install.install(repo, state, dry_run=True) == 0
+    assert install.install(repo, root, dry_run=True) == 0
     fake_run.assert_not_called()
     assert not (tmp_path / "home").exists()
+    assert not (root / "releases").exists()
     assert "com.agent.prod" in capsys.readouterr().out
 
 

@@ -10,7 +10,12 @@ import httpx
 
 from agent.process import CommandError, run_command
 
-LABELS = {"prod": "com.agent.prod", "ops": "com.agent.ops"}
+LABELS = {
+    "prod": "com.agent.prod",
+    "staging": "com.agent.staging",
+    "ops": "com.agent.ops",
+    "runner": "com.agent.runner",
+}
 GITHUB_REPOSITORY = "yakinorinori/-Mac-Mini-agent"
 LOG_MAX_BYTES = 5 * 1024 * 1024
 TAIL_READ_BYTES = 64 * 1024
@@ -39,6 +44,12 @@ def launchd_domain() -> str:
 
 def plist_path(target: str) -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LABELS[target]}.plist"
+
+
+def staging_plist_path() -> Path:
+    """ログイン時に自動で起動しないよう、LaunchAgentsの外に置く。"""
+
+    return state_dir() / f"{LABELS['staging']}.plist"
 
 
 def _service(target: str) -> str:
@@ -71,6 +82,20 @@ def start_service(target: str):
 
 def restart_service(target: str):
     run_command(["launchctl", "kickstart", "-k", _service(target)], timeout=60)
+
+
+def start_staging_service():
+    run_command(["launchctl", "bootstrap", launchd_domain(), str(staging_plist_path())], timeout=60)
+
+
+def stop_staging_service():
+    """未起動でも問題ないので、停止の失敗は状態を見て判断する。"""
+
+    try:
+        stop_service("staging")
+    except CommandError:
+        if service_state("staging")["loaded"]:
+            raise
 
 
 def stop_marker(target: str) -> Path:
@@ -123,10 +148,27 @@ def github_main_status():
     except (httpx.HTTPError, KeyError, ValueError):
         return None
 
-    runs = [run for run in checks.json().get("check_runs", []) if run.get("name") == "test"]
-    result = (runs[0].get("conclusion") or runs[0].get("status")) if runs else "未実行"
+    return {"sha": sha, "commit": sha[:7], "ci": _conclusion_from(checks.json())}
 
-    return {"commit": sha[:7], "ci": result}
+
+def _conclusion_from(data) -> str:
+    runs = [run for run in data.get("check_runs", []) if run.get("name") == "test"]
+    return (runs[0].get("conclusion") or runs[0].get("status")) if runs else "未実行"
+
+
+def ci_conclusion(sha: str):
+    """指定コミットのCI結果を返す。取得できなければ None を返す。"""
+
+    try:
+        response = httpx.get(
+            f"https://api.github.com/repos/{GITHUB_REPOSITORY}/commits/{sha}/check-runs",
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        return _conclusion_from(response.json())
+    except (httpx.HTTPError, ValueError):
+        return None
 
 
 def redact(text: str) -> str:
