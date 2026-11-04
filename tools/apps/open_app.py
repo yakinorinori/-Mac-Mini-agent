@@ -1,6 +1,6 @@
-import subprocess
+from agent.process import run_command
 
 
 def open_app(name):
 
-    subprocess.run(["open", "-a", name])
+    run_command(["open", "-a", name])

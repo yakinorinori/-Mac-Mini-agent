@@ -1,8 +1,23 @@
+from pydantic import Field
+
 from agent.models import Tool
+from agent.schemas import ToolArgs
 from .google_search import google_search
 from .open_url import open_url
 from .open_bookmark import open_bookmark
 from config import BOOKMARKS
+
+
+class SearchArgs(ToolArgs):
+    query: str = Field(min_length=1, max_length=500)
+
+
+class UrlArgs(ToolArgs):
+    url: str = Field(min_length=1, max_length=2048)
+
+
+class BookmarkArgs(ToolArgs):
+    name: str = Field(min_length=1, max_length=100)
 
 
 def register(registry):
@@ -10,6 +25,7 @@ def register(registry):
     registry.register(
         Tool(
             name="google_search",
+            args_schema=SearchArgs,
             function=google_search,
             description="""
 GoogleでWeb検索を行う。
@@ -28,6 +44,7 @@ Python チュートリアル
     registry.register(
         Tool(
             name="open_url",
+            args_schema=UrlArgs,
             function=open_url,
             description="""
 指定したURLをブラウザで開く。
@@ -48,6 +65,7 @@ https://github.com
     registry.register(
         Tool(
             name="open_bookmark",
+            args_schema=BookmarkArgs,
             function=open_bookmark,
             description=f"""
 登録済みのブックマークをChromeで開く。

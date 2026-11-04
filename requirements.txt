@@ -1,0 +1,4 @@
+python-telegram-bot>=20,<23
+openai>=2,<4
+python-dotenv>=1,<2
+pydantic>=2,<3

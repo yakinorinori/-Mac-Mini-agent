@@ -1,9 +1,10 @@
 import json
 import re
 from datetime import datetime
-from openai import OpenAI
+from openai import APIConnectionError, NotFoundError, OpenAI
 from agent.models import Command, Plan, Step
-from config import OPENAI_API_KEY, OLLAMA_BASE_URL, MODEL_ROUTER
+from agent.schemas import PlanValidationError, build_plan
+from config import OLLAMA_BASE_URL, MODEL_ROUTER
 
 
 # 難易度の定義
@@ -12,6 +13,7 @@ DIFFICULTY_LEVELS = ["easy", "medium", "hard", "api", "impossible"]
 # VS Code宛の引用符付き指示かどうかの判定用
 _VSCODE_KEYWORDS = ("vscode", "vs code", "visual studio code")
 _QUOTE_CHARS = re.compile(r'["\'「」“”‘’]')
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 def _is_vscode_chat_request(text: str) -> bool:
@@ -27,7 +29,6 @@ class Planner:
         self.context = context
         self.registry = registry
         self._ollama_client = None
-        self._openai_client = None
 
     # ── クライアント ──────────────────────────────
 
@@ -39,18 +40,6 @@ class Planner:
                 api_key="ollama",
             )
         return self._ollama_client
-
-    @property
-    def openai_client(self):
-        if self._openai_client is None:
-            self._openai_client = OpenAI(api_key=OPENAI_API_KEY)
-        return self._openai_client
-
-    def _get_client(self, model: str):
-        """モデル名からクライアントを選択"""
-        if model.startswith("gpt-"):
-            return self.openai_client
-        return self.ollama_client
 
     # ── 難易度分類 ────────────────────────────────
 
@@ -143,9 +132,7 @@ easy / medium / hard / api / impossible"""
 実行できるツールがない場合は null を返してください。
 JSONのみ出力してください。"""
 
-        client = self._get_client(model)
-
-        response = client.chat.completions.create(
+        response = self.ollama_client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
@@ -154,8 +141,12 @@ JSONのみ出力してください。"""
         content = response.choices[0].message.content.strip()
         print(f"[Planner] モデル={model} 応答: {content}")
 
-        if content.lower() == "null":
-            return None
+        return self._parse_plan(content)
+
+    def _parse_plan(self, content: str) -> Plan | None:
+        """LLMの応答からPlanを取り出す。形式が不正なら PlanValidationError を送出する。"""
+
+        content = _THINK_BLOCK.sub("", content).strip()
 
         if content.startswith("```"):
             content = content.split("```")[1]
@@ -163,22 +154,15 @@ JSONのみ出力してください。"""
                 content = content[4:]
             content = content.strip()
 
-        data = json.loads(content)
+        if content.lower() == "null":
+            return None
 
-        steps = [
-            Step(
-                tool=s["tool"],
-                args=s.get("args", {}),
-                reason=s.get("reason", ""),
-            )
-            for s in data.get("steps", [])
-        ]
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise PlanValidationError("LLMの応答がJSONではありません") from e
 
-        return Plan(
-            steps=steps,
-            message=data.get("message", ""),
-            delay=data.get("delay"),
-        )
+        return build_plan(data, self.registry)
 
     # ── メインロジック ────────────────────────────
 
@@ -217,28 +201,49 @@ JSONのみ出力してください。"""
                 delay=None,
             )
 
-        # ③ 担当モデルを決定
-        model = MODEL_ROUTER[difficulty]
+        # 外部APIへの送信は承認フローができるまで行わない
+        if difficulty == "api":
+            print("[Planner] api → 外部送信せず対応不可として返す")
+            return Plan(
+                steps=[],
+                message="この依頼はローカルモデルでは対応できないため、実行しませんでした(外部APIには送信していません)。",
+                delay=None,
+            )
 
-        try:
-            return self._generate_flow(intent.text, model, tools_description)
+        # ③ 担当モデルから順に試す(失敗時も外部APIへは送らない)
+        last_error = None
 
-        except Exception as e:
-            print(f"[Planner] モデル={model} エラー: {e}")
+        for model in self._local_models_for(difficulty):
+            try:
+                return self._generate_flow(intent.text, model, tools_description)
+            except Exception as e:
+                print(f"[Planner] モデル={model} エラー: {e}")
+                last_error = e
 
-            # ④ 失敗したら1段階上のモデルにフォールバック
-            idx = DIFFICULTY_LEVELS.index(difficulty)
-            for next_level in DIFFICULTY_LEVELS[idx + 1:]:
-                next_model = MODEL_ROUTER[next_level]
-                if next_model is None:
-                    break
-                print(f"[Planner] フォールバック → {next_level}({next_model})")
-                try:
-                    return self._generate_flow(intent.text, next_model, tools_description)
-                except Exception as e2:
-                    print(f"[Planner] フォールバックも失敗: {e2}")
+        return self._failure_plan(last_error)
 
+    def _local_models_for(self, difficulty: str) -> list[str]:
+        """担当モデル → 上位モデル → 下位モデルの順に、ローカルモデルを重複なく返す。"""
+
+        index = DIFFICULTY_LEVELS.index(difficulty)
+        levels = DIFFICULTY_LEVELS[index:] + DIFFICULTY_LEVELS[:index][::-1]
+        models = [MODEL_ROUTER[level] for level in levels if MODEL_ROUTER[level]]
+
+        return list(dict.fromkeys(models))
+
+    def _failure_plan(self, error) -> Plan | None:
+        """原因が分かる失敗は、利用者が対処できるメッセージにする。"""
+
+        if isinstance(error, APIConnectionError):
+            message = "ローカルLLM(Ollama)に接続できません。Ollamaが起動しているか確認してください。"
+        elif isinstance(error, NotFoundError):
+            message = "ローカルLLMのモデルが見つかりません。ollama list で導入済みのモデルを確認してください。"
+        elif isinstance(error, PlanValidationError):
+            message = "実行計画を安全に作れなかったため、何も実行しませんでした。言い方を変えてもう一度送ってください。"
+        else:
             return None
+
+        return Plan(steps=[], message=message, delay=None)
 
     # ── ツール一覧整形 ────────────────────────────
 
