@@ -225,11 +225,24 @@ class Deployer:
         with self.paths.history.open("a", encoding="utf-8") as file:
             file.write(json.dumps({"time": self.clock(), "event": event, **fields}) + "\n")
 
-    def _write_journal(self, previous, target):
+    def _write_journal(self, previous, target, older=None):
         self.paths.journal.write_text(
-            json.dumps({"previous": previous, "target": target, "time": self.clock()}),
+            json.dumps({
+                "previous": previous,
+                "target": target,
+                "older": older,
+                "time": self.clock(),
+            }),
             encoding="utf-8",
         )
+
+    def _restore_previous_link(self, older):
+        """失敗した反映の前に戻せたリリースへ、戻り先を復元する。"""
+
+        if is_valid_sha(older) and self.release_path(older).is_dir():
+            self._point(self.paths.previous, older)
+        else:
+            self.paths.previous.unlink(missing_ok=True)
 
     # ── 起動確認 ──
 
@@ -300,7 +313,8 @@ class Deployer:
             self._record("deploy_build_failed", commit=sha)
             raise DeployError(f"{short(sha)} の準備に失敗しました。本番は変更していません。\n{e}") from e
 
-        self._write_journal(current, sha)
+        older = link_target(self.paths.previous)
+        self._write_journal(current, sha, older)
 
         if current:
             self._point(self.paths.previous, current)
@@ -320,15 +334,16 @@ class Deployer:
             return
 
         self._record("deploy_unhealthy", commit=sha, previous=current)
-        self._revert_after_failure(current, sha)
+        self._revert_after_failure(current, sha, older)
 
-    def _revert_after_failure(self, previous, failed):
+    def _revert_after_failure(self, previous, failed, older=None):
         if not previous:
             self.paths.journal.unlink(missing_ok=True)
             self.notify(f"🚨 {short(failed)} が起動できず、戻せるリリースもありません。")
             return
 
         self._point(self.paths.prod, previous)
+        self._restore_previous_link(older)
 
         try:
             healthy = self._restart_prod_and_wait(previous)
@@ -390,7 +405,7 @@ class Deployer:
 
         if is_valid_sha(previous) and self.release_path(previous).is_dir():
             self.notify(f"⚠️ 前回の反映が中断していたので、{short(previous)} へ戻します。")
-            self._revert_after_failure(previous, journal.get("target"))
+            self._revert_after_failure(previous, journal.get("target"), journal.get("older"))
         else:
             self.paths.journal.unlink(missing_ok=True)
             self.notify("⚠️ 前回の反映が中断していました。/status で状態を確認してください。")

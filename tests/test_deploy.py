@@ -181,6 +181,25 @@ def test_unhealthy_deploy_reverts_automatically(env):
     assert not env.paths.journal.exists()
     assert "deploy_reverted" in _history(env)
     assert any("↩️" in note for note in env.notes)
+    assert link_target(env.paths.previous) == env.first
+
+
+def test_rollback_still_works_after_failed_deploy(env):
+    second = env.upstream.commit("second")
+    env.deployer.deploy(second)
+    third = env.upstream.commit("third")
+    env.services.unhealthy.add(third)
+    env.deployer.deploy(third)
+    env.deployer.rollback()
+    assert link_target(env.paths.prod) == env.first
+
+
+def test_failed_first_deploy_leaves_no_rollback_target(env):
+    second = env.upstream.commit("second")
+    env.services.unhealthy.add(second)
+    env.deployer.deploy(second)
+    assert link_target(env.paths.prod) == env.first
+    assert link_target(env.paths.previous) is None
 
 
 def test_crash_loop_is_not_treated_as_healthy(env):
@@ -286,10 +305,12 @@ def test_interrupted_deploy_is_recovered(env):
     third = env.upstream.commit("third")
     env.deployer.sync_mirror()
     env.deployer.build_release(third)
-    env.paths.journal.write_text(json.dumps({"previous": second, "target": third}))
+    env.paths.journal.write_text(json.dumps({"previous": second, "target": third, "older": env.first}))
     env.deployer._point(env.paths.prod, third)
+    env.deployer._point(env.paths.previous, second)
     env.deployer.recover()
     assert link_target(env.paths.prod) == second
+    assert link_target(env.paths.previous) == env.first
     assert not env.paths.journal.exists()
 
 
