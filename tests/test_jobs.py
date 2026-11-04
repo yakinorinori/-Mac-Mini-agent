@@ -180,10 +180,12 @@ def test_event_loop_stays_responsive_during_planning(env, monkeypatch):
 def test_tool_execution_does_not_block_event_loop(env, monkeypatch):
     release = threading.Event()
     started = threading.Event()
+    released_in_time = []
 
     def execute(plan):
         started.set()
-        release.wait(5)
+        # イベントループが止まっていると解放されず、ここで時間切れになる
+        released_in_time.append(release.wait(1))
         return []
 
     env.execute.side_effect = execute
@@ -193,12 +195,11 @@ def test_tool_execution_does_not_block_event_loop(env, monkeypatch):
     async def scenario():
         await main.receive(update, None)
         await _until(started.is_set)
-        await asyncio.wait_for(asyncio.sleep(0), timeout=1)
         release.set()
         await main.jobs.join()
 
     asyncio.run(scenario())
-    env.execute.assert_called_once()
+    assert released_in_time == [True]
 
 
 def test_cancel_removes_waiting_message_and_reports_running(env, monkeypatch):
