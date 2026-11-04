@@ -17,6 +17,4 @@ def open_bookmark(name: str):
         )
 
     url = BOOKMARKS[key]
-    print(f"[open_bookmark] {key} → {url}")
-
     run_command(["open", "-a", "Google Chrome", url])

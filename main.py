@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TimedOut
@@ -16,6 +17,7 @@ from agent.agent import Agent
 from agent.executor import ToolManager
 from agent.schemas import plan_requires_approval
 from context import Context
+from heartbeat import INTERVAL_SECONDS, current_commit, state_dir, write_heartbeat
 from scheduler import Scheduler
 from tools.vscode.send_chat import open_dev_mode, type_into_vscode_chat, submit_vscode_chat
 
@@ -181,7 +183,7 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
 
-    print("受信:", text)
+    print(f"受信: {len(text)}文字")
 
     try:
         await handle_text(update, text)
@@ -231,9 +233,41 @@ async def on_approval_decision(update: Update, context: ContextTypes.DEFAULT_TYP
         await message.reply_text(f"⚠️ エラーが発生しました: {e}")
 
 
+async def heartbeat_loop(directory, name):
+    commit = await asyncio.to_thread(current_commit)
+
+    while True:
+        try:
+            write_heartbeat(directory, name, commit)
+        except OSError as e:
+            print("heartbeatエラー:", e.strerror)
+
+        await asyncio.sleep(INTERVAL_SECONDS)
+
+
+async def _on_start(app):
+    directory = state_dir()
+
+    if directory:
+        name = os.getenv("AGENT_NAME", "prod")
+        app.bot_data["heartbeat"] = asyncio.create_task(heartbeat_loop(directory, name))
+
+
+async def _on_stop(app):
+    task = app.bot_data.get("heartbeat")
+    if task:
+        task.cancel()
+
+
 def build_application():
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .post_init(_on_start)
+        .post_shutdown(_on_stop)
+        .build()
+    )
 
     app.add_handler(
         MessageHandler(build_message_filter(ALLOWED_TELEGRAM_USER_IDS), receive)

@@ -90,7 +90,7 @@ easy / medium / hard / api / impossible"""
                     print(f"[Planner] 難易度: {d}")
                     return d
 
-            print(f"[Planner] 難易度分類失敗（応答: {level}）→ medium にフォールバック")
+            print("[Planner] 難易度分類失敗 → medium にフォールバック")
             return "medium"
 
         except Exception as e:
@@ -139,9 +139,11 @@ JSONのみ出力してください。"""
         )
 
         content = response.choices[0].message.content.strip()
-        print(f"[Planner] モデル={model} 応答: {content}")
+        plan = self._parse_plan(content)
+        tools = [step.tool for step in plan.steps] if plan else []
+        print(f"[Planner] モデル={model} ツール={tools}")
 
-        return self._parse_plan(content)
+        return plan
 
     def _parse_plan(self, content: str) -> Plan | None:
         """LLMの応答からPlanを取り出す。形式が不正なら PlanValidationError を送出する。"""
