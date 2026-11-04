@@ -137,6 +137,11 @@ def test_service_state_handles_unknown_service(fake_run):
     assert system.service_state("prod") == {"loaded": False, "running": False, "pid": None}
 
 
+def test_tests_do_not_see_the_real_home():
+    assert not system.plist_path("remote-control").exists()
+    assert str(Path.home()).startswith(os.environ["HOME"])
+
+
 def test_wait_until_unloaded_polls_until_gone(monkeypatch):
     states = iter([True, True, False])
     monkeypatch.setattr(system, "service_state", lambda t: {"loaded": next(states)})

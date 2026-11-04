@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -143,16 +144,18 @@ class Deployer:
             [str(python), "-m", "pip", "install", "--quiet", "-r", str(path / "requirements-dev.txt")],
             timeout=INSTALL_TIMEOUT_SECONDS,
         )
-        run_command(
-            [str(python), "-m", "pytest", "-q", "-p", "no:cacheprovider"],
-            timeout=TEST_TIMEOUT_SECONDS,
-            cwd=path,
-            env={
-                "PATH": os.environ.get("PATH", ""),
-                "HOME": str(Path.home()),
-                "LANG": "en_US.UTF-8",
-            },
-        )
+
+        with tempfile.TemporaryDirectory() as home:
+            run_command(
+                [str(python), "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+                timeout=TEST_TIMEOUT_SECONDS,
+                cwd=path,
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": home,
+                    "LANG": "en_US.UTF-8",
+                },
+            )
 
     def _remove_release(self, sha: str):
         path = self.release_path(sha)
