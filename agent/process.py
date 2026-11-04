@@ -2,14 +2,14 @@
 import subprocess
 
 DEFAULT_TIMEOUT_SECONDS = 120
-_MAX_ERROR_OUTPUT = 500
+_MAX_ERROR_OUTPUT = 800
 
 
 class CommandError(RuntimeError):
     """外部コマンドが起動できない、タイムアウトした、または失敗した。"""
 
 
-def run_command(args, timeout=DEFAULT_TIMEOUT_SECONDS):
+def run_command(args, timeout=DEFAULT_TIMEOUT_SECONDS, cwd=None, env=None):
     """コマンドを実行する。引数の値はメッセージに含めない(本文などを漏らさないため)。"""
 
     name = args[0]
@@ -20,6 +20,8 @@ def run_command(args, timeout=DEFAULT_TIMEOUT_SECONDS):
             capture_output=True,
             text=True,
             timeout=timeout,
+            cwd=cwd,
+            env=env,
         )
     except subprocess.TimeoutExpired as e:
         raise CommandError(f"{name} が{timeout}秒以内に終了しませんでした") from e
@@ -27,7 +29,8 @@ def run_command(args, timeout=DEFAULT_TIMEOUT_SECONDS):
         raise CommandError(f"{name} を実行できませんでした: {e.strerror}") from e
 
     if result.returncode != 0:
-        detail = (result.stderr or "").strip()[:_MAX_ERROR_OUTPUT]
+        # 原因は出力の末尾に出ることが多いので、末尾を残す
+        detail = (result.stderr or result.stdout or "").strip()[-_MAX_ERROR_OUTPUT:]
         raise CommandError(f"{name} が失敗しました(終了コード{result.returncode}): {detail}")
 
     return result

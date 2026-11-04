@@ -1,5 +1,8 @@
 """運用専用のTelegram Bot。LLMやツールを読み込まず、固定のコマンドだけを受け付ける。"""
 import asyncio
+import json
+import os
+import secrets
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -15,23 +18,32 @@ from approvals import DEFAULT_TTL_SECONDS, ApprovalStore
 from config import ALLOWED_TELEGRAM_USER_IDS, TOKEN
 from heartbeat import current_commit, write_heartbeat
 from ops import system
+from ops.deploy import default_paths, is_valid_branch, link_target
 
 MONITOR_INTERVAL_SECONDS = 60
 # 今の本番Botは計画中に処理が止まることがあるので、長めに判定する
 HEARTBEAT_STALE_SECONDS = 300
+# これより長く残る反映の記録は、中断の可能性があるとして通知する
+DEPLOY_STUCK_SECONDS = 20 * 60
 MEMORY_FREE_ALERT_PERCENT = 10
 DISK_FREE_ALERT_GB = 5
 MAX_MESSAGE_LENGTH = 3500
+
+RESTART_TARGETS = ("prod", "ops")
 
 APPROVE = "ops_approve"
 REJECT = "ops_reject"
 
 HELP = """運用コマンド:
 /status 各プロセス、コミット、メモリ、ディスク、CI
-/logs prod または /logs ops 直近のログ
+/logs prod|staging|ops|runner 直近のログ
+/deploy mainの最新を本番へ反映（承認あり）
+/rollback 直前のリリースへ戻す（承認あり）
+/deploy_staging ブランチ名 stagingへ反映（承認あり）
+/stop_staging stagingを停止
 /stop_prod 本番Botを停止（承認あり）
 /start_prod 本番Botを再開（承認あり）
-/restart prod または /restart ops 再起動（承認あり）"""
+/restart prod|ops 再起動（承認あり）"""
 
 approvals = ApprovalStore()
 
@@ -40,12 +52,23 @@ def build_filter(allowed_user_ids):
     return filters.ChatType.PRIVATE & filters.User(user_id=allowed_user_ids)
 
 
+def enqueue(action: str, **fields):
+    """runnerへの要求を置く。書きかけを読まれないよう、完成してから移動する。"""
+
+    requests = system.state_dir() / "requests"
+    requests.mkdir(parents=True, exist_ok=True)
+    name = f"{time.time_ns()}-{secrets.token_hex(4)}.json"
+    temporary = system.state_dir() / f".{name}.tmp"
+    temporary.write_text(json.dumps({"action": action, **fields}), encoding="utf-8")
+    os.replace(temporary, requests / name)
+
+
 def collect_status() -> str:
     """現在の状態を文章にする。時間のかかる処理を含むのでスレッドで呼ぶ。"""
 
     lines = []
 
-    for target in system.LABELS:
+    for target in ("prod", "staging", "ops"):
         state = system.service_state(target)
         heartbeat = system.read_heartbeat(target)
 
@@ -61,6 +84,13 @@ def collect_status() -> str:
             if heartbeat else "記録なし"
         )
         lines.append(f"{target}: {label}（{detail}）")
+
+    paths = default_paths()
+    previous = link_target(paths.previous)
+    lines.append(f"戻せるリリース: {previous[:7] if previous else 'なし'}")
+
+    if paths.journal.exists():
+        lines.append("反映を処理中です")
 
     memory = system.memory_free_percent()
     lines.append(f"メモリ空き: {memory}%" if memory is not None else "メモリ空き: 取得できません")
@@ -84,8 +114,16 @@ def check_health() -> set[str]:
     """通知すべき問題の集合を返す。"""
 
     problems = set()
+    journal = default_paths().journal
 
-    if not system.stop_marker("prod").exists():
+    try:
+        deploying = True
+        if time.time() - journal.stat().st_mtime > DEPLOY_STUCK_SECONDS:
+            problems.add("反映の処理が終わっていない可能性があります")
+    except OSError:
+        deploying = False
+
+    if not deploying and not system.stop_marker("prod").exists():
         state = system.service_state("prod")
         heartbeat = system.read_heartbeat("prod")
 
@@ -156,7 +194,7 @@ async def show_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = context.args[0] if len(context.args) == 1 else None
 
     if target not in system.LABELS:
-        await update.message.reply_text("使い方: /logs prod または /logs ops")
+        await update.message.reply_text("使い方: /logs prod|staging|ops|runner")
         return
 
     text = await asyncio.to_thread(system.tail_log, target)
@@ -186,11 +224,76 @@ async def request_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def request_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = context.args[0] if len(context.args) == 1 else None
 
-    if target not in system.LABELS:
-        await update.message.reply_text("使い方: /restart prod または /restart ops")
+    if target not in RESTART_TARGETS:
+        await update.message.reply_text("使い方: /restart prod|ops")
         return
 
     await _request_approval(update, ("restart", target), f"{target} を再起動します。")
+
+
+async def request_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    github = await asyncio.to_thread(system.github_main_status)
+
+    if github is None:
+        await update.message.reply_text("GitHubからmainの状態を取得できません。")
+        return
+
+    if github["ci"] != "success":
+        await update.message.reply_text(
+            f"main（{github['commit']}）のCIが成功していないので反映できません（{github['ci']}）。"
+        )
+        return
+
+    current = link_target(default_paths().prod)
+
+    if current == github["sha"]:
+        await update.message.reply_text(f"{github['commit']} は反映済みです。")
+        return
+
+    await _request_approval(
+        update,
+        ("deploy", github["sha"]),
+        f"本番を {current[:7] if current else 'なし'} から {github['commit']} へ更新します。",
+    )
+
+
+async def request_rollback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    paths = default_paths()
+    previous = link_target(paths.previous)
+
+    if not previous:
+        await update.message.reply_text("戻せるリリースがありません。")
+        return
+
+    current = link_target(paths.prod)
+    await _request_approval(
+        update,
+        ("rollback", previous),
+        f"本番を {current[:7] if current else 'なし'} から {previous[:7]} へ戻します。",
+    )
+
+
+async def request_deploy_staging(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    branch = context.args[0] if len(context.args) == 1 else None
+
+    if not is_valid_branch(branch):
+        await update.message.reply_text("使い方: /deploy_staging ブランチ名")
+        return
+
+    if not (system.state_dir() / "staging.env").is_file():
+        await update.message.reply_text("staging.env がありません。先にMac miniで作成してください。")
+        return
+
+    await _request_approval(
+        update,
+        ("deploy_staging", branch),
+        f"stagingへ {branch} を反映します。stagingはこのMac上で実際に操作を実行できます。",
+    )
+
+
+async def stop_staging(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    enqueue("stop_staging")
+    await update.message.reply_text("stagingの停止を受け付けました。")
 
 
 def stop_prod():
@@ -218,6 +321,15 @@ async def run_action(message, action: tuple[str, str]):
     elif operation == "start":
         await asyncio.to_thread(start_prod)
         await message.reply_text("▶️ 本番Botを再開しました。/status で確認できます。")
+    elif operation == "deploy":
+        enqueue("deploy", sha=target)
+        await message.reply_text("反映を受け付けました。数分かかることがあります。結果は通知します。")
+    elif operation == "rollback":
+        enqueue("rollback")
+        await message.reply_text("切り戻しを受け付けました。結果は通知します。")
+    elif operation == "deploy_staging":
+        enqueue("deploy_staging", branch=target)
+        await message.reply_text("stagingへの反映を受け付けました。結果は通知します。")
     elif operation == "restart" and target == "ops":
         # 自分自身を再起動すると以降は返信できないので、先に伝える
         await message.reply_text("🔄 Ops Botを再起動します。起動後に通知します。")
@@ -294,6 +406,10 @@ def build_application():
         ("stop_prod", request_stop),
         ("start_prod", request_start),
         ("restart", request_restart),
+        ("deploy", request_deploy),
+        ("rollback", request_rollback),
+        ("deploy_staging", request_deploy_staging),
+        ("stop_staging", stop_staging),
     ]:
         app.add_handler(CommandHandler(name, handler, filters=allowed))
 

@@ -10,10 +10,19 @@ import httpx
 
 from agent.process import CommandError, run_command
 
-LABELS = {"prod": "com.agent.prod", "ops": "com.agent.ops"}
+LABELS = {
+    "prod": "com.agent.prod",
+    "staging": "com.agent.staging",
+    "ops": "com.agent.ops",
+    "runner": "com.agent.runner",
+}
 GITHUB_REPOSITORY = "yakinorinori/-Mac-Mini-agent"
 LOG_MAX_BYTES = 5 * 1024 * 1024
 TAIL_READ_BYTES = 64 * 1024
+UNLOAD_TIMEOUT_SECONDS = 15
+UNLOAD_POLL_SECONDS = 0.5
+BOOTSTRAP_ATTEMPTS = 5
+BOOTSTRAP_RETRY_SECONDS = 3
 
 _SECRET_PATTERNS = [
     (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"), "[TELEGRAM_TOKEN]"),
@@ -41,6 +50,12 @@ def plist_path(target: str) -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LABELS[target]}.plist"
 
 
+def staging_plist_path() -> Path:
+    """ログイン時に自動で起動しないよう、LaunchAgentsの外に置く。"""
+
+    return state_dir() / f"{LABELS['staging']}.plist"
+
+
 def _service(target: str) -> str:
     return f"{launchd_domain()}/{LABELS[target]}"
 
@@ -61,16 +76,53 @@ def service_state(target: str) -> dict:
     }
 
 
+def wait_until_unloaded(target: str, timeout: float = UNLOAD_TIMEOUT_SECONDS):
+    """launchctl bootout は解除の完了を待たずに戻ることがあるので、解除されるまで待つ。"""
+
+    deadline = time.monotonic() + timeout
+
+    while service_state(target)["loaded"] and time.monotonic() < deadline:
+        time.sleep(UNLOAD_POLL_SECONDS)
+
+
 def stop_service(target: str):
     run_command(["launchctl", "bootout", _service(target)], timeout=60)
+    wait_until_unloaded(target)
+
+
+def bootstrap_service(path: Path):
+    """登録する。解除の直後は一時的に失敗することがあるので再試行する。"""
+
+    for attempt in range(1, BOOTSTRAP_ATTEMPTS + 1):
+        try:
+            run_command(["launchctl", "bootstrap", launchd_domain(), str(path)], timeout=60)
+            return
+        except CommandError as e:
+            if attempt == BOOTSTRAP_ATTEMPTS:
+                raise CommandError(f"{path.name} の登録に失敗しました: {e}") from e
+            time.sleep(BOOTSTRAP_RETRY_SECONDS)
 
 
 def start_service(target: str):
-    run_command(["launchctl", "bootstrap", launchd_domain(), str(plist_path(target))], timeout=60)
+    bootstrap_service(plist_path(target))
 
 
 def restart_service(target: str):
     run_command(["launchctl", "kickstart", "-k", _service(target)], timeout=60)
+
+
+def start_staging_service():
+    bootstrap_service(staging_plist_path())
+
+
+def stop_staging_service():
+    """未起動でも問題ないので、停止の失敗は状態を見て判断する。"""
+
+    try:
+        stop_service("staging")
+    except CommandError:
+        if service_state("staging")["loaded"]:
+            raise
 
 
 def stop_marker(target: str) -> Path:
@@ -123,10 +175,27 @@ def github_main_status():
     except (httpx.HTTPError, KeyError, ValueError):
         return None
 
-    runs = [run for run in checks.json().get("check_runs", []) if run.get("name") == "test"]
-    result = (runs[0].get("conclusion") or runs[0].get("status")) if runs else "未実行"
+    return {"sha": sha, "commit": sha[:7], "ci": _conclusion_from(checks.json())}
 
-    return {"commit": sha[:7], "ci": result}
+
+def _conclusion_from(data) -> str:
+    runs = [run for run in data.get("check_runs", []) if run.get("name") == "test"]
+    return (runs[0].get("conclusion") or runs[0].get("status")) if runs else "未実行"
+
+
+def ci_conclusion(sha: str):
+    """指定コミットのCI結果を返す。取得できなければ None を返す。"""
+
+    try:
+        response = httpx.get(
+            f"https://api.github.com/repos/{GITHUB_REPOSITORY}/commits/{sha}/check-runs",
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        return _conclusion_from(response.json())
+    except (httpx.HTTPError, ValueError):
+        return None
 
 
 def redact(text: str) -> str:
