@@ -23,7 +23,7 @@ SERVER_ARGUMENTS = [
     "remote-control",
     "--spawn", "worktree",
     "--capacity", "2",
-    "--permission-mode", "default",
+    "--permission-mode", "acceptEdits",
 ]
 THROTTLE_SECONDS = 30
 BASE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -32,6 +32,16 @@ FORBIDDEN_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 # 本番の秘密情報と本番コードをClaude Codeから守る設定
 SETTINGS = {
     "permissions": {
+        # 読み取りとテストだけ確認を省く。push、PR作成、削除などは確認を残す
+        "allow": [
+            "Bash(git status*)",
+            "Bash(git diff*)",
+            "Bash(git log*)",
+            "Bash(git add *)",
+            "Bash(git commit *)",
+            "Bash(python -m pytest*)",
+            "Bash(.venv/bin/python -m pytest*)",
+        ],
         "deny": [
             "Read(~/agent/state/**)",
             "Edit(~/agent/state/**)",
