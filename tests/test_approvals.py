@@ -95,7 +95,7 @@ def _request():
     ("open_bookmark", False),
     ("excel_open", False),
     ("take_screenshot", False),
-    ("google_search", False),
+    ("google_search", True),
 ])
 def test_approval_requirement_per_tool(tool, expected):
     plan = Plan(steps=[Step(tool=tool)])

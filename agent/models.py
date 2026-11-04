@@ -37,6 +37,8 @@ class Plan:
     steps: List[Step] = field(default_factory=list)
     message: str = ""
     delay: Optional[int] = None
+    # ユーザーの明示的な検索指示からコードが作ったPlanだけTrueにする。LLMの出力では設定できない
+    preapproved: bool = False
 
     def describe(self) -> str:
         """ユーザーに提示する「使用するツールと操作フロー」のテキストを組み立てる。"""

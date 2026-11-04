@@ -25,10 +25,12 @@ def register(registry):
     registry.register(
         Tool(
             name="google_search",
+            requires_approval=True,
             args_schema=SearchArgs,
             function=google_search,
             description="""
-GoogleでWeb検索を行う。
+Googleの検索結果をブラウザで開き、URLを返す。結果の読み取りや要約はしない。
+ユーザーがWeb検索を求めている時だけ選ぶ。挨拶や雑談では選ばない。
 
 引数:
 query

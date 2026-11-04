@@ -50,6 +50,9 @@ class _PlanSchema(BaseModel):
 def plan_requires_approval(plan, registry) -> bool:
     """承認が必要なツール、または確認できないツールを含むPlanならTrueを返す。"""
 
+    if plan.preapproved and plan.steps and all(s.tool == "google_search" for s in plan.steps):
+        return False
+
     for step in plan.steps:
         tool = registry.get(step.tool)
         if tool is None or tool.requires_approval:

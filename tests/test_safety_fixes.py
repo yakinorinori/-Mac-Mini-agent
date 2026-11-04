@@ -18,7 +18,6 @@ from agent.planner import Planner
 from agent.process import CommandError, run_applescript, run_command
 from agent.schemas import NoArgs
 from context import Context
-from tools.browser.google_search import google_search
 from tools.browser.open_bookmark import open_bookmark
 from tools.calendar.calendar_add import calendar_add
 from tools.mail.mail_send import mail_send
@@ -198,11 +197,6 @@ def test_unknown_bookmark_is_an_error(fake_run):
     with pytest.raises(ValueError):
         open_bookmark("存在しない")
     fake_run.assert_not_called()
-
-
-def test_google_search_does_not_pretend_to_succeed():
-    with pytest.raises(NotImplementedError):
-        google_search("天気")
 
 
 def _tool_manager(*tools):
