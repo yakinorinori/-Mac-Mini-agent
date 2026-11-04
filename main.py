@@ -1,6 +1,7 @@
 import asyncio
 
 from telegram import Update
+from telegram.error import TimedOut
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -20,6 +21,9 @@ app_context = Context()
 agent = Agent(app_context, registry=tm.registry)
 scheduler = Scheduler()
 
+# 既定の待ち時間では、画像の処理中に応答待ちが切れることがある
+PHOTO_TIMEOUT_SECONDS = 60
+
 
 def build_message_filter(allowed_user_ids):
     """許可ユーザーからの個人チャットの新規テキストだけを受け付けるフィルタを作る。"""
@@ -38,7 +42,18 @@ async def send_results(update: Update, plan, results):
     for step, result in results:
         if step.tool == "take_screenshot" and result:
             with open(result, "rb") as photo:
-                await update.message.reply_photo(photo)
+                try:
+                    await update.message.reply_photo(
+                        photo,
+                        read_timeout=PHOTO_TIMEOUT_SECONDS,
+                        write_timeout=PHOTO_TIMEOUT_SECONDS,
+                    )
+                except TimedOut:
+                    # 届いている場合があるので、重複を避けて自動で再送しない
+                    await update.message.reply_text(
+                        "⚠️ 画像の送信完了を確認できませんでした。届いていなければ、もう一度送ってください。"
+                    )
+                    return
 
     await update.message.reply_text(plan.message or "完了しました。")
 

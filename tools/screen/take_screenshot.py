@@ -10,9 +10,10 @@ def take_screenshot():
     output_dir = Path(__file__).resolve().parent / "captures"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = output_dir / f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    filename = output_dir / f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
 
-    run_command(["screencapture", "-x", str(filename)])
+    # 送信時間を抑えるためPNGではなくJPEGで保存する
+    run_command(["screencapture", "-x", "-t", "jpg", str(filename)])
 
     if not filename.is_file():
         raise CommandError("screencapture が画像を作成しませんでした")

@@ -1,19 +1,24 @@
 """環境設定とツールの入力制限の回帰テスト(OS操作はモックする)。"""
+import asyncio
+import inspect
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 from openai import APIConnectionError, NotFoundError
+from telegram import Message
+from telegram.error import TimedOut
 
 import config
+import main
 from agent.executor import ToolManager
-from agent.models import Intent
+from agent.models import Intent, Plan, Step
 from agent.planner import Planner
 from context import Context
 from plugins.plugin_manager import PluginManager
@@ -174,6 +179,54 @@ def test_calendar_event_sets_end_date(fake_run):
     script = fake_run.call_args.args[0][2]
     assert "set endDate to startDate + (1 * hours)" in script
     assert "end date:endDate" in script
+
+
+def test_screenshot_is_saved_as_jpeg(fake_run, monkeypatch):
+    def create_file(args, **kwargs):
+        Path(args[-1]).touch()
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    fake_run.side_effect = create_file
+    result = Path(take_screenshot())
+    try:
+        args = fake_run.call_args.args[0]
+        assert args[:4] == ["screencapture", "-x", "-t", "jpg"]
+        assert result.suffix == ".jpg"
+    finally:
+        result.unlink()
+
+
+def _screenshot_update(tmp_path, reply_photo):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"image")
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock(), reply_photo=reply_photo))
+    results = [(Step(tool="take_screenshot"), str(photo))]
+    return update, results
+
+
+def test_photo_uses_longer_timeouts_supported_by_telegram(tmp_path):
+    reply_photo = AsyncMock()
+    update, results = _screenshot_update(tmp_path, reply_photo)
+
+    asyncio.run(main.send_results(update, Plan(message="送信しました"), results))
+
+    kwargs = reply_photo.call_args.kwargs
+    assert kwargs["read_timeout"] == main.PHOTO_TIMEOUT_SECONDS
+    assert kwargs["write_timeout"] == main.PHOTO_TIMEOUT_SECONDS
+    assert {"read_timeout", "write_timeout"} <= set(inspect.signature(Message.reply_photo).parameters)
+    update.message.reply_text.assert_awaited_once_with("送信しました")
+
+
+def test_photo_timeout_is_not_reported_as_success_or_resent(tmp_path):
+    reply_photo = AsyncMock(side_effect=TimedOut())
+    update, results = _screenshot_update(tmp_path, reply_photo)
+
+    asyncio.run(main.send_results(update, Plan(message="送信しました"), results))
+
+    reply_photo.assert_awaited_once()
+    replies = [c.args[0] for c in update.message.reply_text.call_args_list]
+    assert "送信しました" not in replies
+    assert "確認できませんでした" in replies[0]
 
 
 def test_close_app_requests_normal_quit_with_name_as_argument(fake_run):
