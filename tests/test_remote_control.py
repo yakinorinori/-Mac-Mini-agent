@@ -29,7 +29,7 @@ def test_plist_starts_server_without_inheriting_environment(tmp_path):
     data = plistlib.loads(install_dev.render_plist(claude, tmp_path / "dev", tmp_path / "state"))
     assert data["Label"] == "com.agent.remote-control"
     assert data["ProgramArguments"] == [
-        str(claude), "remote-control", "--spawn", "worktree", "--capacity", "2", "--permission-mode", "default",
+        str(claude), "remote-control", "--spawn", "worktree", "--capacity", "2", "--permission-mode", "acceptEdits",
     ]
     assert data["WorkingDirectory"] == str(tmp_path / "dev")
     assert data["KeepAlive"] is True
@@ -49,6 +49,12 @@ def test_settings_protect_production_and_never_bypass():
     assert "bypassPermissions" not in install_dev.SERVER_ARGUMENTS
 
 
+def test_confirmation_stays_for_push_and_pull_requests():
+    allowed = install_dev.SETTINGS["permissions"]["allow"]
+    assert not any("push" in rule or "gh " in rule or "rm " in rule for rule in allowed)
+    assert any("pytest" in rule for rule in allowed)
+
+
 def test_settings_merge_keeps_existing_values(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({
@@ -59,7 +65,7 @@ def test_settings_merge_keeps_existing_values(tmp_path):
     install_dev.apply_settings(path)
     merged = json.loads(path.read_text())
     assert merged["model"] == "keep"
-    assert merged["permissions"]["allow"] == ["Bash(ls)"]
+    assert merged["permissions"]["allow"][0] == "Bash(ls)"
     assert merged["permissions"]["deny"][0] == "Read(./x)"
     assert "Read(~/agent/state/**)" in merged["permissions"]["deny"]
     assert "example.com" in merged["sandbox"]["network"]["allowedDomains"]

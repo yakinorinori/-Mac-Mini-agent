@@ -1,7 +1,7 @@
 import asyncio
 import os
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TimedOut
 from telegram.ext import (
     ApplicationBuilder,
@@ -325,6 +325,11 @@ async def heartbeat_loop(directory, name):
 
 
 async def _on_start(app):
+    try:
+        await app.bot.set_my_commands([BotCommand("cancel", "未開始の処理を取り消す")])
+    except Exception as e:
+        print("メニュー設定エラー:", type(e).__name__)
+
     directory = state_dir()
 
     if directory:

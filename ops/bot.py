@@ -2,10 +2,11 @@
 import asyncio
 import json
 import os
+import re
 import secrets
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -17,7 +18,7 @@ from telegram.ext import (
 from approvals import DEFAULT_TTL_SECONDS, ApprovalStore
 from config import ALLOWED_TELEGRAM_USER_IDS, TOKEN
 from heartbeat import current_commit, write_heartbeat
-from ops import system
+from ops import github, system
 from ops.deploy import default_paths, is_valid_branch, link_target
 
 MONITOR_INTERVAL_SECONDS = 60
@@ -31,10 +32,27 @@ MAX_MESSAGE_LENGTH = 3500
 
 RESTART_TARGETS = ("prod", "ops", "remote-control")
 
+PR_NOTICES_FILE = "pr-notified.json"
+PR_NOTICES_LIMIT = 200
+_PR_ACTION = re.compile(r"^(pr_staging|pr_deploy|pr_close):([1-9][0-9]{0,8}):([0-9a-f]{12})$")
+_ROLLBACK_ACTION = re.compile(r"^rollback_to:([0-9a-f]{12})$")
+_CI_PENDING = {"未実行", "queued", "in_progress", "waiting", "requested", "pending"}
+
+COMMANDS = [
+    ("prs", "開いているPRと操作ボタン"),
+    ("status", "稼働状況"),
+    ("deploy", "mainを本番へ反映"),
+    ("rollback", "1つ前へ戻す"),
+    ("stop_staging", "検証Botを停止"),
+    ("logs", "ログ（例: /logs prod）"),
+    ("help", "使い方"),
+]
+
 APPROVE = "ops_approve"
 REJECT = "ops_reject"
 
 HELP = """運用コマンド:
+/prs 開いているPRと操作ボタン
 /status 各プロセス、コミット、メモリ、ディスク、CI
 /logs prod|staging|ops|runner|remote-control 直近のログ
 /deploy mainの最新を本番へ反映（承認あり）
@@ -157,10 +175,75 @@ def alert_messages(previous: set[str], current: set[str]) -> list[str]:
     return messages
 
 
-async def notify_all(bot, text):
+def pr_buttons(pull: dict) -> InlineKeyboardMarkup:
+    key = f"{pull['number']}:{pull['sha'][:12]}"
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧪 検証する", callback_data=f"pr_staging:{key}")],
+        [InlineKeyboardButton("🚀 マージして本番へ", callback_data=f"pr_deploy:{key}")],
+        [InlineKeyboardButton("🚫 閉じる", callback_data=f"pr_close:{key}")],
+    ])
+
+
+def pr_text(pull: dict, conclusion) -> str:
+    state = {"success": "CI成功"}.get(conclusion, f"CI: {conclusion}")
+    return (
+        f"PR #{pull['number']} {pull['title']}\n"
+        f"{pull['branch']}（{pull['sha'][:7]}）\n{state}\n{pull['url']}"
+    )
+
+
+def _load_pr_notices() -> list:
+    try:
+        data = json.loads((system.state_dir() / PR_NOTICES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+    return data if isinstance(data, list) else []
+
+
+def _save_pr_notices(notices: list):
+    temporary = system.state_dir() / f".{PR_NOTICES_FILE}.tmp"
+    temporary.write_text(json.dumps(notices[-PR_NOTICES_LIMIT:]), encoding="utf-8")
+    os.replace(temporary, system.state_dir() / PR_NOTICES_FILE)
+
+
+def collect_pr_notices() -> list[tuple]:
+    """CIが終わった未通知のPRを返す。同じコミットは再起動後も重ねて通知しない。"""
+
+    notices = _load_pr_notices()
+    results = []
+
+    for pull in github.open_pull_requests():
+        key = f"{pull['number']}:{pull['sha']}"
+
+        if not pull["same_repo"] or pull["draft"] or key in notices:
+            continue
+
+        conclusion = github.ci_conclusion(pull["sha"])
+
+        if conclusion in _CI_PENDING or conclusion is None:
+            continue
+
+        notices.append(key)
+        results.append((pull, conclusion))
+
+    if results:
+        _save_pr_notices(notices)
+
+    return results
+
+
+async def send_pr_notices(bot):
+    for pull, conclusion in await asyncio.to_thread(collect_pr_notices):
+        markup = pr_buttons(pull) if conclusion == "success" else None
+        await notify_all(bot, pr_text(pull, conclusion), reply_markup=markup)
+
+
+async def notify_all(bot, text, reply_markup=None):
     for user_id in ALLOWED_TELEGRAM_USER_IDS:
         try:
-            await bot.send_message(chat_id=user_id, text=text)
+            await bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup)
         except Exception as e:
             print("[Ops] 通知エラー:", type(e).__name__)
 
@@ -179,6 +262,9 @@ async def monitor_loop(bot):
 
             known_problems = current
 
+            if github.has_token():
+                await send_pr_notices(bot)
+
             for target in system.LABELS:
                 await asyncio.to_thread(system.rotate_log, system.log_path(target))
         except asyncio.CancelledError:
@@ -191,6 +277,27 @@ async def monitor_loop(bot):
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP)
+
+
+async def show_prs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not github.has_token():
+        await update.message.reply_text("GITHUB_TOKEN が未設定です。Mac miniの ops.env に設定してください。")
+        return
+
+    try:
+        pulls = await asyncio.to_thread(github.open_pull_requests)
+        pulls = [pull for pull in pulls if pull["same_repo"] and not pull["draft"]]
+
+        if not pulls:
+            await update.message.reply_text("開いているPRはありません。")
+            return
+
+        for pull in pulls:
+            conclusion = await asyncio.to_thread(github.ci_conclusion, pull["sha"])
+            markup = pr_buttons(pull) if conclusion == "success" else None
+            await update.message.reply_text(pr_text(pull, conclusion), reply_markup=markup)
+    except github.GitHubError as e:
+        await update.message.reply_text(f"⚠️ {e}")
 
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -384,7 +491,94 @@ async def on_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"⚠️ 失敗しました: {system.redact(str(e))[:MAX_MESSAGE_LENGTH]}")
 
 
+async def _clear_buttons(query):
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as e:
+        print("[Ops] ボタン更新エラー:", type(e).__name__)
+
+
+async def on_pr_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """PRのボタンを処理する。押した時点でPRの状態を確かめ直す。"""
+
+    query = update.callback_query
+
+    if update.effective_user.id not in ALLOWED_TELEGRAM_USER_IDS:
+        await query.answer()
+        return
+
+    await query.answer()
+    match = _PR_ACTION.match(query.data)
+
+    if match is None:
+        await query.message.reply_text("このボタンは無効です。")
+        return
+
+    action, number, short_sha = match.group(1), int(match.group(2)), match.group(3)
+
+    try:
+        pull = await asyncio.to_thread(github.get_pull_request, number)
+    except github.GitHubError as e:
+        await query.message.reply_text(f"⚠️ {e}")
+        return
+
+    if pull["state"] != "open" or not pull["sha"].startswith(short_sha) or not pull["same_repo"]:
+        await _clear_buttons(query)
+        await query.message.reply_text(f"PR #{number} は変更されたか閉じられています。/prs で確認してください。")
+        return
+
+    if action == "pr_staging":
+        if not (system.state_dir() / "staging.env").is_file():
+            await query.message.reply_text("staging.env がありません。先にMac miniで作成してください。")
+            return
+
+        enqueue("deploy_staging", branch=pull["branch"])
+        await query.message.reply_text(f"🧪 {pull['branch']} をstagingへ反映します。結果は通知します。")
+    elif action == "pr_deploy":
+        await _clear_buttons(query)
+        enqueue("merge_deploy", number=number, sha=pull["sha"])
+        await query.message.reply_text(f"🚀 PR #{number} をマージして本番へ反映します。結果は通知します。")
+    else:
+        await _clear_buttons(query)
+
+        try:
+            await asyncio.to_thread(github.close_pull_request, number)
+            await query.message.reply_text(f"🚫 PR #{number} を閉じました。")
+        except github.GitHubError as e:
+            await query.message.reply_text(f"⚠️ {e}")
+
+
+async def on_rollback_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """通知の [戻す] を処理する。その後に本番が変わっていたら戻さない。"""
+
+    query = update.callback_query
+
+    if update.effective_user.id not in ALLOWED_TELEGRAM_USER_IDS:
+        await query.answer()
+        return
+
+    await query.answer()
+    await _clear_buttons(query)
+    match = _ROLLBACK_ACTION.match(query.data)
+    current = link_target(default_paths().prod)
+
+    if match is None or not current or not current.startswith(match.group(1)):
+        await query.message.reply_text("本番がその後に変わったので戻しません。/status で確認してください。")
+        return
+
+    enqueue("rollback")
+    await query.message.reply_text("↩️ 1つ前へ戻します。結果は通知します。")
+
+
+async def _set_command_menu(bot):
+    try:
+        await bot.set_my_commands([BotCommand(name, text) for name, text in COMMANDS])
+    except Exception as e:
+        print("[Ops] メニュー設定エラー:", type(e).__name__)
+
+
 async def _on_start(app):
+    await _set_command_menu(app.bot)
     await notify_all(app.bot, "🟢 Ops Botが起動しました。/status で状態を確認できます。")
     app.bot_data["monitor"] = asyncio.create_task(monitor_loop(app.bot))
 
@@ -417,10 +611,13 @@ def build_application():
         ("rollback", request_rollback),
         ("deploy_staging", request_deploy_staging),
         ("stop_staging", stop_staging),
+        ("prs", show_prs),
     ]:
         app.add_handler(CommandHandler(name, handler, filters=allowed))
 
     app.add_handler(CallbackQueryHandler(on_decision, pattern=f"^({APPROVE}|{REJECT}):"))
+    app.add_handler(CallbackQueryHandler(on_pr_action, pattern="^pr_"))
+    app.add_handler(CallbackQueryHandler(on_rollback_button, pattern="^rollback_to:"))
 
     return app
 

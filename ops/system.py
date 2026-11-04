@@ -29,6 +29,7 @@ _SECRET_PATTERNS = [
     (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"), "[TELEGRAM_TOKEN]"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"), "[API_KEY]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "[GITHUB_TOKEN]"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "[GITHUB_TOKEN]"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[AWS_KEY]"),
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer [REDACTED]"),
     (

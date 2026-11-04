@@ -465,7 +465,7 @@ def test_every_command_requires_allowed_private_user(monkeypatch):
     names = {name for h in commands for name in h.commands}
     assert names == {
         "start", "help", "status", "logs", "stop_prod", "start_prod", "restart",
-        "deploy", "rollback", "deploy_staging", "stop_staging",
+        "deploy", "rollback", "deploy_staging", "stop_staging", "prs",
     }
 
     def update_for(user_id, chat_type):
