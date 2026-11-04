@@ -7,6 +7,7 @@ import pytest
 from telegram.ext import CallbackQueryHandler
 
 import main
+from helpers import run_and_drain
 from agent.models import Plan, Step
 from agent.schemas import plan_requires_approval
 from approvals import ApprovalStore
@@ -73,13 +74,13 @@ def _press(data, user_id=USER):
         edit_message_reply_markup=AsyncMock(),
     )
     update = SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=user_id))
-    asyncio.run(main.on_approval_decision(update, None))
+    run_and_drain(main.on_approval_decision(update, None))
     return query
 
 
 def _request():
     update = _text_update()
-    asyncio.run(main.receive(update, None))
+    run_and_drain(main.receive(update, None))
     return update
 
 
@@ -203,7 +204,7 @@ def test_button_update_failure_does_not_block_decision(env):
         edit_message_reply_markup=AsyncMock(),
     )
     update = SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=USER))
-    asyncio.run(main.on_approval_decision(update, None))
+    run_and_drain(main.on_approval_decision(update, None))
     env.execute.assert_called_once()
 
 
@@ -211,7 +212,7 @@ def test_long_preview_is_split_with_buttons_only_on_last(env, monkeypatch):
     long_plan = Plan(steps=[Step(tool="mail_send", args={"body": "あ" * 9000})], message="ok")
     monkeypatch.setattr(main.agent, "plan", lambda text: long_plan)
     update = _request()
-    calls = update.message.reply_text.call_args_list
+    calls = [c for c in update.message.reply_text.call_args_list if not c.args[0].startswith("⏳")]
     assert len(calls) == 3
     assert all(len(c.args[0]) <= main.MAX_MESSAGE_LENGTH for c in calls)
     assert "".join(c.args[0] for c in calls).count("あ") == 9000

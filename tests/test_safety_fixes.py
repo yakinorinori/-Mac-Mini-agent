@@ -11,6 +11,7 @@ from telegram import Chat, Message, Update, User
 
 import config
 import main
+from helpers import run_and_drain
 from agent import planner as planner_module
 from agent.executor import ToolManager
 from agent.models import Intent, Plan, Step, Tool
@@ -221,9 +222,10 @@ def test_execute_plan_reports_failed_and_completed_steps():
 
 
 def _telegram_update():
-    return SimpleNamespace(message=SimpleNamespace(
-        text="依頼", reply_text=AsyncMock(), reply_photo=AsyncMock()
-    ))
+    return SimpleNamespace(
+        message=SimpleNamespace(text="依頼", reply_text=AsyncMock(), reply_photo=AsyncMock()),
+        effective_user=SimpleNamespace(id=ALLOWED_ID),
+    )
 
 
 def test_receive_reports_failure_instead_of_llm_success_message(monkeypatch):
@@ -233,7 +235,7 @@ def test_receive_reports_failure_instead_of_llm_success_message(monkeypatch):
     monkeypatch.setattr(main.app_context, "dev_mode", False)
     update = _telegram_update()
 
-    asyncio.run(main.receive(update, None))
+    run_and_drain(main.receive(update, None))
 
     replies = [c.args[0] for c in update.message.reply_text.call_args_list]
     assert "送信しました！" not in replies
@@ -246,7 +248,7 @@ def test_receive_reports_dev_mode_failure(monkeypatch):
     update = _telegram_update()
     update.message.text = "開発モード"
 
-    asyncio.run(main.receive(update, None))
+    run_and_drain(main.receive(update, None))
 
     assert main.app_context.dev_mode is False
     assert "boom" in update.message.reply_text.call_args.args[0]
@@ -270,11 +272,13 @@ def test_delayed_plan_notifies_real_outcome(monkeypatch, fails):
 
     async def scenario():
         await main.receive(update, None)
+        await main.jobs.join()
         replies = [c.args[0] for c in update.message.reply_text.call_args_list]
         assert "完了文面" not in replies
         execute.assert_not_called()
         threads[0].start()
         await asyncio.to_thread(threads[0].join)
+        await main.jobs.join()
 
     asyncio.run(scenario())
 

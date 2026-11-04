@@ -16,6 +16,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler
 
 import heartbeat
 import main
+from helpers import run_and_drain
 from agent.models import Intent, Plan, Step
 from agent.planner import Planner
 from approvals import ApprovalStore
@@ -46,8 +47,11 @@ def fake_run(monkeypatch):
 def test_received_text_is_not_logged(monkeypatch, capsys):
     monkeypatch.setattr(main.agent, "plan", lambda text: None)
     monkeypatch.setattr(main.app_context, "dev_mode", False)
-    update = SimpleNamespace(message=SimpleNamespace(text=SECRET, reply_text=AsyncMock()))
-    asyncio.run(main.receive(update, None))
+    update = SimpleNamespace(
+        message=SimpleNamespace(text=SECRET, reply_text=AsyncMock()),
+        effective_user=SimpleNamespace(id=USER),
+    )
+    run_and_drain(main.receive(update, None))
     assert SECRET not in capsys.readouterr().out
 
 

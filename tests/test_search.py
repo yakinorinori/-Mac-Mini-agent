@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import main
+from helpers import run_and_drain
 from agent.models import Intent, Plan, Step
 from agent.planner import Planner, extract_search_query
 from agent.schemas import PlanValidationError, build_plan, plan_requires_approval
@@ -115,7 +116,7 @@ def test_keyword_search_runs_and_replies_with_link(monkeypatch):
     monkeypatch.setattr(main.agent.planner, "_classify", MagicMock(side_effect=AssertionError))
     update = _update("今日の天気を調べて")
 
-    asyncio.run(main.receive(update, None))
+    run_and_drain(main.receive(update, None))
 
     replies = [c.args[0] for c in update.message.reply_text.call_args_list]
     assert run.call_args.args[0][0] == "open"
@@ -132,7 +133,7 @@ def test_llm_search_waits_for_approval(monkeypatch):
     monkeypatch.setattr(main.agent, "plan", lambda text: plan)
     update = _update("こんにちは")
 
-    asyncio.run(main.receive(update, None))
+    run_and_drain(main.receive(update, None))
 
     run.assert_not_called()
     assert "reply_markup" in update.message.reply_text.call_args.kwargs
