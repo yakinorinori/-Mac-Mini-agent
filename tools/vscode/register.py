@@ -14,6 +14,7 @@ def register(registry):
     registry.register(
         Tool(
             name="send_to_vscode_chat",
+            requires_approval=True,
             args_schema=VscodeChatArgs,
             function=send_to_vscode_chat,
             description="""

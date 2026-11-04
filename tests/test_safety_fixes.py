@@ -233,7 +233,7 @@ def _telegram_update():
 
 
 def test_receive_reports_failure_instead_of_llm_success_message(monkeypatch):
-    plan = Plan(steps=[Step(tool="bad")], message="送信しました！")
+    plan = Plan(steps=[Step(tool="take_screenshot")], message="送信しました！")
     monkeypatch.setattr(main.agent, "plan", lambda text: plan)
     monkeypatch.setattr(main.tm, "execute_plan", MagicMock(side_effect=RuntimeError("boom")))
     monkeypatch.setattr(main.app_context, "dev_mode", False)
@@ -260,7 +260,7 @@ def test_receive_reports_dev_mode_failure(monkeypatch):
 
 @pytest.mark.parametrize("fails", [False, True])
 def test_delayed_plan_notifies_real_outcome(monkeypatch, fails):
-    plan = Plan(steps=[Step(tool="t")], message="完了文面", delay=1)
+    plan = Plan(steps=[Step(tool="take_screenshot")], message="完了文面", delay=1)
     monkeypatch.setattr(main.agent, "plan", lambda text: plan)
     monkeypatch.setattr(main.app_context, "dev_mode", False)
     execute = MagicMock(side_effect=RuntimeError("boom")) if fails else MagicMock(return_value=[])

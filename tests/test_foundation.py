@@ -208,7 +208,7 @@ def test_photo_uses_longer_timeouts_supported_by_telegram(tmp_path):
     reply_photo = AsyncMock()
     update, results = _screenshot_update(tmp_path, reply_photo)
 
-    asyncio.run(main.send_results(update, Plan(message="送信しました"), results))
+    asyncio.run(main.send_results(update.message, Plan(message="送信しました"), results))
 
     kwargs = reply_photo.call_args.kwargs
     assert kwargs["read_timeout"] == main.PHOTO_TIMEOUT_SECONDS
@@ -221,7 +221,7 @@ def test_photo_timeout_is_not_reported_as_success_or_resent(tmp_path):
     reply_photo = AsyncMock(side_effect=TimedOut())
     update, results = _screenshot_update(tmp_path, reply_photo)
 
-    asyncio.run(main.send_results(update, Plan(message="送信しました"), results))
+    asyncio.run(main.send_results(update.message, Plan(message="送信しました"), results))
 
     reply_photo.assert_awaited_once()
     replies = [c.args[0] for c in update.message.reply_text.call_args_list]

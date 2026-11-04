@@ -56,3 +56,4 @@ class Tool:
     function: Callable
     description: str
     args_schema: Type[BaseModel]
+    requires_approval: bool = False  # 実行前にTelegramでの承認を必須にする

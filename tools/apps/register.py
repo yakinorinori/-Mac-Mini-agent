@@ -33,6 +33,7 @@ Visual Studio Code 2
     registry.register(
         Tool(
             name="close_app",
+            requires_approval=True,
             args_schema=AppArgs,
             function=close_app,
             description="""

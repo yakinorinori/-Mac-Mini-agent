@@ -17,6 +17,7 @@ def register(registry):
     registry.register(
         Tool(
             name="mail_send",
+            requires_approval=True,
             args_schema=MailSendArgs,
             function=mail_send,
             description="""

@@ -47,6 +47,17 @@ class _PlanSchema(BaseModel):
     delay: int | None = Field(default=None, ge=0, le=MAX_DELAY_SECONDS)
 
 
+def plan_requires_approval(plan, registry) -> bool:
+    """承認が必要なツール、または確認できないツールを含むPlanならTrueを返す。"""
+
+    for step in plan.steps:
+        tool = registry.get(step.tool)
+        if tool is None or tool.requires_approval:
+            return True
+
+    return False
+
+
 def _summarize(error: ValidationError) -> str:
     """入力値(メール本文など)を含めず、問題のある項目と種類だけを返す。"""
 

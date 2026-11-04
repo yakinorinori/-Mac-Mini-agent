@@ -16,6 +16,7 @@ def register(registry):
     registry.register(
         Tool(
             name="calendar_add",
+            requires_approval=True,
             args_schema=CalendarAddArgs,
             function=calendar_add,
             description="""
