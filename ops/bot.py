@@ -29,21 +29,21 @@ MEMORY_FREE_ALERT_PERCENT = 10
 DISK_FREE_ALERT_GB = 5
 MAX_MESSAGE_LENGTH = 3500
 
-RESTART_TARGETS = ("prod", "ops")
+RESTART_TARGETS = ("prod", "ops", "remote-control")
 
 APPROVE = "ops_approve"
 REJECT = "ops_reject"
 
 HELP = """運用コマンド:
 /status 各プロセス、コミット、メモリ、ディスク、CI
-/logs prod|staging|ops|runner 直近のログ
+/logs prod|staging|ops|runner|remote-control 直近のログ
 /deploy mainの最新を本番へ反映（承認あり）
 /rollback 直前のリリースへ戻す（承認あり）
 /deploy_staging ブランチ名 stagingへ反映（承認あり）
 /stop_staging stagingを停止
 /stop_prod 本番Botを停止（承認あり）
 /start_prod 本番Botを再開（承認あり）
-/restart prod|ops 再起動（承認あり）"""
+/restart prod|ops|remote-control 再起動（承認あり）"""
 
 approvals = ApprovalStore()
 
@@ -68,7 +68,7 @@ def collect_status() -> str:
 
     lines = []
 
-    for target in ("prod", "staging", "ops"):
+    for target in ("prod", "staging", "ops", "remote-control"):
         state = system.service_state(target)
         heartbeat = system.read_heartbeat(target)
 
@@ -78,6 +78,10 @@ def collect_status() -> str:
             label = "停止中（指示による）"
         else:
             label = "停止" if state["loaded"] else "未登録"
+
+        if target == "remote-control":
+            lines.append(f"{target}: {label}")
+            continue
 
         detail = (
             f"{heartbeat.get('commit', '?')}、応答 {system.age_text(heartbeat['time'])}"
@@ -131,6 +135,9 @@ def check_health() -> set[str]:
             problems.add("本番Botが停止しています")
         elif heartbeat is None or time.time() - heartbeat["time"] > HEARTBEAT_STALE_SECONDS:
             problems.add("本番Botの応答記録が更新されていません")
+
+    if system.plist_path("remote-control").exists() and not system.service_state("remote-control")["running"]:
+        problems.add("Remote Controlが停止しています")
 
     memory = system.memory_free_percent()
     if memory is not None and memory < MEMORY_FREE_ALERT_PERCENT:
@@ -194,7 +201,7 @@ async def show_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = context.args[0] if len(context.args) == 1 else None
 
     if target not in system.LABELS:
-        await update.message.reply_text("使い方: /logs prod|staging|ops|runner")
+        await update.message.reply_text("使い方: /logs prod|staging|ops|runner|remote-control")
         return
 
     text = await asyncio.to_thread(system.tail_log, target)
@@ -225,7 +232,7 @@ async def request_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = context.args[0] if len(context.args) == 1 else None
 
     if target not in RESTART_TARGETS:
-        await update.message.reply_text("使い方: /restart prod|ops")
+        await update.message.reply_text("使い方: /restart prod|ops|remote-control")
         return
 
     await _request_approval(update, ("restart", target), f"{target} を再起動します。")

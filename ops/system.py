@@ -15,6 +15,7 @@ LABELS = {
     "staging": "com.agent.staging",
     "ops": "com.agent.ops",
     "runner": "com.agent.runner",
+    "remote-control": "com.agent.remote-control",
 }
 GITHUB_REPOSITORY = "yakinorinori/-Mac-Mini-agent"
 LOG_MAX_BYTES = 5 * 1024 * 1024
