@@ -1,5 +1,12 @@
+from pydantic import Field
+
 from agent.models import Tool
+from agent.schemas import ToolArgs
 from .send_chat import send_to_vscode_chat
+
+
+class VscodeChatArgs(ToolArgs):
+    message: str = Field(min_length=1, max_length=10000)
 
 
 def register(registry):
@@ -7,6 +14,7 @@ def register(registry):
     registry.register(
         Tool(
             name="send_to_vscode_chat",
+            args_schema=VscodeChatArgs,
             function=send_to_vscode_chat,
             description="""
 Mac mini上のVS Code(Copilot Chat)へ、遠隔で指示を送って実装を進めさせる。

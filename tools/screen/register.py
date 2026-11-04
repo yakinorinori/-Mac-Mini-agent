@@ -1,4 +1,5 @@
 from agent.models import Tool
+from agent.schemas import NoArgs
 from .take_screenshot import take_screenshot
 
 
@@ -7,6 +8,7 @@ def register(registry):
     registry.register(
         Tool(
             name="take_screenshot",
+            args_schema=NoArgs,
             function=take_screenshot,
             description="""
 Macの画面全体のスクリーンショットを撮影する。

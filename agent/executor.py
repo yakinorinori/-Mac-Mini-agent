@@ -1,4 +1,5 @@
 from registry.tool_registry import ToolRegistry
+from agent.schemas import validate_tool_args
 from plugins.plugin_manager import PluginManager
 
 
@@ -22,7 +23,7 @@ class ToolManager:
         if tool is None:
             raise ValueError(f"ツールが見つかりません: {command.tool}")
 
-        return tool.function(**command.args)
+        return tool.function(**validate_tool_args(tool, command.args))
 
     def execute_plan(self, plan):
         """Planの各ステップを順番に実行する。失敗した場合は何ステップ目かを添えて例外を送出する。

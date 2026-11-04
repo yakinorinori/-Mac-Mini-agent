@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from openai import APIConnectionError, NotFoundError, OpenAI
 from agent.models import Command, Plan, Step
+from agent.schemas import PlanValidationError, build_plan
 from config import OLLAMA_BASE_URL, MODEL_ROUTER
 
 
@@ -12,6 +13,7 @@ DIFFICULTY_LEVELS = ["easy", "medium", "hard", "api", "impossible"]
 # VS Code宛の引用符付き指示かどうかの判定用
 _VSCODE_KEYWORDS = ("vscode", "vs code", "visual studio code")
 _QUOTE_CHARS = re.compile(r'["\'「」“”‘’]')
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 def _is_vscode_chat_request(text: str) -> bool:
@@ -139,8 +141,12 @@ JSONのみ出力してください。"""
         content = response.choices[0].message.content.strip()
         print(f"[Planner] モデル={model} 応答: {content}")
 
-        if content.lower() == "null":
-            return None
+        return self._parse_plan(content)
+
+    def _parse_plan(self, content: str) -> Plan | None:
+        """LLMの応答からPlanを取り出す。形式が不正なら PlanValidationError を送出する。"""
+
+        content = _THINK_BLOCK.sub("", content).strip()
 
         if content.startswith("```"):
             content = content.split("```")[1]
@@ -148,22 +154,15 @@ JSONのみ出力してください。"""
                 content = content[4:]
             content = content.strip()
 
-        data = json.loads(content)
+        if content.lower() == "null":
+            return None
 
-        steps = [
-            Step(
-                tool=s["tool"],
-                args=s.get("args", {}),
-                reason=s.get("reason", ""),
-            )
-            for s in data.get("steps", [])
-        ]
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise PlanValidationError("LLMの応答がJSONではありません") from e
 
-        return Plan(
-            steps=steps,
-            message=data.get("message", ""),
-            delay=data.get("delay"),
-        )
+        return build_plan(data, self.registry)
 
     # ── メインロジック ────────────────────────────
 
@@ -239,6 +238,8 @@ JSONのみ出力してください。"""
             message = "ローカルLLM(Ollama)に接続できません。Ollamaが起動しているか確認してください。"
         elif isinstance(error, NotFoundError):
             message = "ローカルLLMのモデルが見つかりません。ollama list で導入済みのモデルを確認してください。"
+        elif isinstance(error, PlanValidationError):
+            message = "実行計画を安全に作れなかったため、何も実行しませんでした。言い方を変えてもう一度送ってください。"
         else:
             return None
 

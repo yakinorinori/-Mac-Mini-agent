@@ -12,6 +12,7 @@ import pytest
 from openai import APIConnectionError, NotFoundError
 
 import config
+from agent.executor import ToolManager
 from agent.models import Intent
 from agent.planner import Planner
 from context import Context
@@ -107,7 +108,10 @@ class _FakeToolsDir:
 
 
 _REQUEST = httpx.Request("POST", "http://localhost:11434/v1/chat/completions")
-_VALID_PLAN = '{"steps": [{"tool": "calendar_add", "args": {}}], "message": "ok", "delay": null}'
+_VALID_PLAN = (
+    '{"steps": [{"tool": "calendar_add", "args": {"title": "会議", "date": "2026/11/10"}}], '
+    '"message": "ok", "delay": null}'
+)
 
 
 def _not_found():
@@ -115,7 +119,7 @@ def _not_found():
 
 
 def _planner(monkeypatch, difficulty, create):
-    planner = Planner(Context())
+    planner = Planner(Context(), registry=ToolManager().registry)
     monkeypatch.setattr(planner, "_classify", lambda *a: difficulty)
     planner._ollama_client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))

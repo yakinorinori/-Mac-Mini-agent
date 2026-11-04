@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field
-from typing import Dict, Any, Callable, Optional, List
+from typing import Dict, Any, Callable, Optional, List, Type
 from datetime import datetime
 from enum import Enum
+
+from pydantic import BaseModel
 
 class MemoryType(str, Enum):
     EPISODIC = "episodic"   # 実行履歴の要約
@@ -53,3 +55,4 @@ class Tool:
     name: str
     function: Callable
     description: str
+    args_schema: Type[BaseModel]

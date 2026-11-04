@@ -16,6 +16,7 @@ from agent.executor import ToolManager
 from agent.models import Intent, Plan, Step, Tool
 from agent.planner import Planner
 from agent.process import CommandError, run_applescript, run_command
+from agent.schemas import NoArgs
 from context import Context
 from tools.browser.google_search import google_search
 from tools.browser.open_bookmark import open_bookmark
@@ -215,8 +216,8 @@ def test_execute_plan_reports_failed_and_completed_steps():
         raise CommandError("boom")
 
     manager = _tool_manager(
-        Tool(name="ok", function=lambda: "done", description=""),
-        Tool(name="bad", function=fail, description=""),
+        Tool(name="ok", function=lambda: "done", description="", args_schema=NoArgs),
+        Tool(name="bad", function=fail, description="", args_schema=NoArgs),
     )
     plan = Plan(steps=[Step(tool="ok"), Step(tool="bad"), Step(tool="ok")])
     with pytest.raises(RuntimeError) as e:

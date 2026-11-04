@@ -1,5 +1,14 @@
+from pydantic import Field
+
 from agent.models import Tool
+from agent.schemas import SingleLine, ToolArgs
 from .calendar_add import calendar_add
+
+
+class CalendarAddArgs(ToolArgs):
+    title: SingleLine = Field(min_length=1, max_length=200)
+    date: str = Field(pattern=r"^\d{4}/\d{1,2}/\d{1,2}$")
+    time: str = Field(default="09:00", pattern=r"^\d{1,2}:\d{2}$")
 
 
 def register(registry):
@@ -7,6 +16,7 @@ def register(registry):
     registry.register(
         Tool(
             name="calendar_add",
+            args_schema=CalendarAddArgs,
             function=calendar_add,
             description="""
 カレンダーにイベントを追加する。終了時刻は開始の1時間後になる。
