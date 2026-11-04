@@ -53,7 +53,10 @@ def test_received_text_is_not_logged(monkeypatch, capsys):
 
 def test_llm_response_is_not_logged(capsys):
     args = {"to": "a@example.com", "subject": SECRET, "body": SECRET}
-    content = json.dumps({"steps": [{"tool": "mail_send", "args": args}], "message": SECRET})
+    content = json.dumps(
+        {"steps": [{"tool": "mail_send", "args": args}], "message": SECRET},
+        ensure_ascii=False,
+    )
     create = MagicMock(return_value=SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
     ))
