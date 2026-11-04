@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 from openai import APIConnectionError, NotFoundError, OpenAI
 from agent.models import Command, Plan, Step
+from agent.calendar_rules import parse_calendar_request
 from agent.routing import is_screenshot_request, rule_level
 from agent.schemas import PlanValidationError, build_plan
 from config import OLLAMA_BASE_URL, MODEL_ROUTER
@@ -242,6 +243,17 @@ JSONのみ出力してください。"""
             return Plan(
                 steps=[Step(tool="take_screenshot", reason="スクリーンショットの指示があったため")],
                 message="📸 スクリーンショットを送りました。",
+                delay=None,
+            )
+
+        # よくある形の予定追加はLLMを通さない。実行前の承認は通常どおり必要
+        calendar_args = parse_calendar_request(intent.text)
+
+        if calendar_args:
+            print("[Planner] 経路=rule:calendar LLMなし")
+            return Plan(
+                steps=[Step(tool="calendar_add", args=calendar_args, reason="予定の追加を読み取りました")],
+                message=f"📅 「{calendar_args['title']}」を{calendar_args['date']} {calendar_args['time']}に追加しました。",
                 delay=None,
             )
 
