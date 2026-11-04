@@ -1,7 +1,7 @@
 import json
 import re
 from datetime import datetime
-from openai import OpenAI
+from openai import APIConnectionError, NotFoundError, OpenAI
 from agent.models import Command, Plan, Step
 from config import OLLAMA_BASE_URL, MODEL_ROUTER
 
@@ -211,28 +211,38 @@ JSONのみ出力してください。"""
                 delay=None,
             )
 
-        # ③ 担当モデルを決定
-        model = MODEL_ROUTER[difficulty]
+        # ③ 担当モデルから順に試す(失敗時も外部APIへは送らない)
+        last_error = None
 
-        try:
-            return self._generate_flow(intent.text, model, tools_description)
+        for model in self._local_models_for(difficulty):
+            try:
+                return self._generate_flow(intent.text, model, tools_description)
+            except Exception as e:
+                print(f"[Planner] モデル={model} エラー: {e}")
+                last_error = e
 
-        except Exception as e:
-            print(f"[Planner] モデル={model} エラー: {e}")
+        return self._failure_plan(last_error)
 
-            # ④ 失敗したら1段階上のモデルにフォールバック
-            idx = DIFFICULTY_LEVELS.index(difficulty)
-            for next_level in DIFFICULTY_LEVELS[idx + 1:]:
-                next_model = MODEL_ROUTER[next_level]
-                if next_model is None:
-                    break
-                print(f"[Planner] フォールバック → {next_level}({next_model})")
-                try:
-                    return self._generate_flow(intent.text, next_model, tools_description)
-                except Exception as e2:
-                    print(f"[Planner] フォールバックも失敗: {e2}")
+    def _local_models_for(self, difficulty: str) -> list[str]:
+        """担当モデル → 上位モデル → 下位モデルの順に、ローカルモデルを重複なく返す。"""
 
+        index = DIFFICULTY_LEVELS.index(difficulty)
+        levels = DIFFICULTY_LEVELS[index:] + DIFFICULTY_LEVELS[:index][::-1]
+        models = [MODEL_ROUTER[level] for level in levels if MODEL_ROUTER[level]]
+
+        return list(dict.fromkeys(models))
+
+    def _failure_plan(self, error) -> Plan | None:
+        """原因が分かる失敗は、利用者が対処できるメッセージにする。"""
+
+        if isinstance(error, APIConnectionError):
+            message = "ローカルLLM(Ollama)に接続できません。Ollamaが起動しているか確認してください。"
+        elif isinstance(error, NotFoundError):
+            message = "ローカルLLMのモデルが見つかりません。ollama list で導入済みのモデルを確認してください。"
+        else:
             return None
+
+        return Plan(steps=[], message=message, delay=None)
 
     # ── ツール一覧整形 ────────────────────────────
 

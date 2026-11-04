@@ -4,10 +4,17 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+from openai import APIConnectionError, NotFoundError
 
+import config
+from agent.models import Intent
+from agent.planner import Planner
+from context import Context
 from plugins.plugin_manager import PluginManager
 from registry.tool_registry import ToolRegistry
 from tools.apps.close_app import _QUIT_SCRIPT, close_app
@@ -96,6 +103,65 @@ class _FakePlugin:
 class _FakeToolsDir:
     def iterdir(self):
         return [_FakePlugin()]
+
+
+_REQUEST = httpx.Request("POST", "http://localhost:11434/v1/chat/completions")
+_VALID_PLAN = '{"steps": [{"tool": "calendar_add", "args": {}}], "message": "ok", "delay": null}'
+
+
+def _not_found():
+    return NotFoundError("missing", response=httpx.Response(404, request=_REQUEST), body=None)
+
+
+def _planner(monkeypatch, difficulty, create):
+    planner = Planner(Context())
+    monkeypatch.setattr(planner, "_classify", lambda *a: difficulty)
+    planner._ollama_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    return planner
+
+
+def _reply(content):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+    )
+
+
+def test_hard_request_falls_back_to_lower_local_model(monkeypatch):
+    def create(model, **kwargs):
+        if model == config.MODEL_ROUTER["hard"]:
+            raise _not_found()
+        return _reply(_VALID_PLAN)
+
+    mock = MagicMock(side_effect=create)
+    plan = _planner(monkeypatch, "hard", mock).plan(Intent("予定を追加して"))
+
+    assert [c.kwargs["model"] for c in mock.call_args_list] == [
+        config.MODEL_ROUTER["hard"],
+        config.MODEL_ROUTER["medium"],
+    ]
+    assert plan.steps[0].tool == "calendar_add"
+
+
+def test_medium_request_tries_higher_then_lower_local_models(monkeypatch):
+    mock = MagicMock(side_effect=_not_found())
+    _planner(monkeypatch, "medium", mock).plan(Intent("依頼"))
+    assert [c.kwargs["model"] for c in mock.call_args_list] == [
+        config.MODEL_ROUTER["medium"],
+        config.MODEL_ROUTER["hard"],
+        config.MODEL_ROUTER["easy"],
+    ]
+
+
+@pytest.mark.parametrize("error, expected", [
+    (APIConnectionError(request=_REQUEST), "接続できません"),
+    (_not_found(), "モデルが見つかりません"),
+])
+def test_known_llm_failures_explain_the_cause(monkeypatch, error, expected):
+    plan = _planner(monkeypatch, "easy", MagicMock(side_effect=error)).plan(Intent("依頼"))
+    assert plan.steps == []
+    assert expected in plan.message
 
 
 def test_close_app_requests_normal_quit_with_name_as_argument(fake_run):
