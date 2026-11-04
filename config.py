@@ -3,8 +3,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# 起動場所に関係なくプロジェクト直下の .env を読む。既存の環境変数を優先する
-load_dotenv(Path(__file__).resolve().with_name(".env"))
+# AGENT_ENV_FILE の指定、なければプロジェクト直下の .env を読む。既存の環境変数を優先する
+load_dotenv(os.getenv("AGENT_ENV_FILE") or Path(__file__).resolve().with_name(".env"))
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
