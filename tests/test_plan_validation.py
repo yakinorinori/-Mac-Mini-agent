@@ -146,7 +146,7 @@ VALID_REPLY = json.dumps(_plan_data("take_screenshot", {}))
 ])
 def test_planner_accepts_valid_reply_formats(reply):
     planner, _ = _planner([reply])
-    assert planner.plan(Intent("スクショ")).steps[0].tool == "take_screenshot"
+    assert planner.plan(Intent("依頼")).steps[0].tool == "take_screenshot"
 
 
 @pytest.mark.parametrize("reply", ["null", "```json\nnull\n```", "<think>x</think>null"])
@@ -158,7 +158,7 @@ def test_planner_treats_null_as_no_plan(reply):
 def test_invalid_reply_retries_next_local_model():
     bad = json.dumps(_plan_data("存在しない", {}))
     planner, create = _planner([bad, VALID_REPLY])
-    plan = planner.plan(Intent("スクショ"))
+    plan = planner.plan(Intent("依頼"))
     assert plan.steps[0].tool == "take_screenshot"
     assert [c.kwargs["model"] for c in create.call_args_list] == [
         config.MODEL_ROUTER["easy"],

@@ -1,8 +1,10 @@
 import json
 import re
+import time
 from datetime import datetime
 from openai import APIConnectionError, NotFoundError, OpenAI
 from agent.models import Command, Plan, Step
+from agent.routing import is_screenshot_request, rule_level
 from agent.schemas import PlanValidationError, build_plan
 from config import OLLAMA_BASE_URL, MODEL_ROUTER
 
@@ -234,10 +236,25 @@ JSONのみ出力してください。"""
                 preapproved=True,
             )
 
+        # スクリーンショットだけの依頼はLLMを通さない
+        if is_screenshot_request(intent.text):
+            print("[Planner] 経路=rule:screenshot LLMなし")
+            return Plan(
+                steps=[Step(tool="take_screenshot", reason="スクリーンショットの指示があったため")],
+                message="📸 スクリーンショットを送りました。",
+                delay=None,
+            )
+
+        started = time.monotonic()
         tools_description = self._build_tools_description()
 
-        # ① 難易度を分類
-        difficulty = self._classify(intent.text, tools_description)
+        # ① 単純な依頼はルールで決め、それ以外はLLMで難易度を分類
+        difficulty = rule_level(intent.text)
+        route = f"rule:{difficulty}"
+
+        if difficulty is None:
+            difficulty = self._classify(intent.text, tools_description)
+            route = f"classify:{difficulty}"
 
         # ② impossible → 即「できません」
         if difficulty == "impossible":
@@ -262,7 +279,9 @@ JSONのみ出力してください。"""
 
         for model in self._local_models_for(difficulty):
             try:
-                return self._generate_flow(intent.text, model, tools_description)
+                plan = self._generate_flow(intent.text, model, tools_description)
+                print(f"[Planner] 経路={route} 所要={time.monotonic() - started:.1f}秒")
+                return plan
             except Exception as e:
                 print(f"[Planner] モデル={model} エラー: {e}")
                 last_error = e
