@@ -9,7 +9,7 @@ def register(registry):
             name="calendar_add",
             function=calendar_add,
             description="""
-カレンダーにイベントを追加する。
+カレンダーにイベントを追加する。終了時刻は開始の1時間後になる。
 
 引数:
 title : イベントのタイトル

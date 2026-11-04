@@ -6,10 +6,11 @@ _ADD_EVENT_SCRIPT = '''
 on run argv
     set eventTitle to item 1 of argv
     set startDate to date (item 2 of argv)
+    set endDate to startDate + (1 * hours)
 
     tell application "Calendar"
         tell (first calendar whose writable is true)
-            make new event with properties {summary:eventTitle, start date:startDate}
+            make new event with properties {summary:eventTitle, start date:startDate, end date:endDate}
         end tell
     end tell
 end run
@@ -17,7 +18,7 @@ end run
 
 
 def calendar_add(title: str, date: str, time: str = "09:00"):
-    """カレンダーにイベントを追加する（Calendar.app経由）
+    """カレンダーに1時間のイベントを追加する（Calendar.app経由）
 
     引数:
         title: イベントのタイトル

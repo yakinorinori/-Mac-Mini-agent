@@ -19,6 +19,7 @@ from plugins.plugin_manager import PluginManager
 from registry.tool_registry import ToolRegistry
 from tools.apps.close_app import _QUIT_SCRIPT, close_app
 from tools.browser.open_url import open_url
+from tools.calendar.calendar_add import calendar_add
 from tools.excel.excel_open import excel_open
 from tools.screen.take_screenshot import take_screenshot
 
@@ -162,6 +163,13 @@ def test_known_llm_failures_explain_the_cause(monkeypatch, error, expected):
     plan = _planner(monkeypatch, "easy", MagicMock(side_effect=error)).plan(Intent("依頼"))
     assert plan.steps == []
     assert expected in plan.message
+
+
+def test_calendar_event_sets_end_date(fake_run):
+    calendar_add("会議", "2026/11/10", "14:00")
+    script = fake_run.call_args.args[0][2]
+    assert "set endDate to startDate + (1 * hours)" in script
+    assert "end date:endDate" in script
 
 
 def test_close_app_requests_normal_quit_with_name_as_argument(fake_run):
