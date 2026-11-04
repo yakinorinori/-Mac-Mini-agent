@@ -45,6 +45,7 @@ def test_other_screen_text_is_not_a_screenshot(text):
     ("Chromeを開いて", "easy"),
     ("メモを起動してください", "easy"),
     ("TextEditを閉じて", "easy"),
+    ("カレンダーに会議を入れて。", "medium"),
 ])
 def test_simple_requests_use_rules(text, level):
     assert rule_level(text) == level
@@ -60,6 +61,7 @@ def test_simple_requests_use_rules(text, level):
     "毎週月曜の会議をカレンダーに追加して",
     "カレンダーに会議を追加できる？",
     "カレンダーに追加して\nメールも送って",
+    "カレンダーに追加して。メールも送って",
     "カレンダーに" + "あ" * 80 + "を追加して",
     "Chromeの開き方を教えて",
 ])

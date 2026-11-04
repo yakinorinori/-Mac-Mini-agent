@@ -21,7 +21,9 @@ _MAIL_SEND = re.compile(r"メール.*(?:送って|送信)")
 _APP_ACTION = re.compile(r"(?:開いて|起動して|閉じて|終了して)(?:ください|下さい)?[。！!]*$")
 
 
-def _is_simple(text: str) -> bool:
+def is_simple(text: str) -> bool:
+    # 文末の句点は複数の文を意味しない
+    text = text.rstrip("。．！!")
     return len(text) <= MAX_SIMPLE_LENGTH and not any(mark in text for mark in _COMPLEX_MARKERS)
 
 
@@ -37,7 +39,7 @@ def rule_level(text: str):
 
     stripped = text.strip()
 
-    if not _is_simple(stripped):
+    if not is_simple(stripped):
         return None
 
     if _CALENDAR_ADD.search(stripped) or _MAIL_SEND.search(stripped):
