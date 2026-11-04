@@ -290,6 +290,10 @@ def main():
             "操作を許可するTelegramユーザーIDを設定してください。"
         )
 
+    # 自動切り戻しの訓練用。訓練後にrevertする
+    if os.getenv("AGENT_NAME") == "prod":
+        raise SystemExit("rollback drill: intentional startup failure")
+
     app = build_application()
 
     print("Bot起動")
