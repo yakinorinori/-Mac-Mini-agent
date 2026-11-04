@@ -137,6 +137,47 @@ def test_service_state_handles_unknown_service(fake_run):
     assert system.service_state("prod") == {"loaded": False, "running": False, "pid": None}
 
 
+def test_wait_until_unloaded_polls_until_gone(monkeypatch):
+    states = iter([True, True, False])
+    monkeypatch.setattr(system, "service_state", lambda t: {"loaded": next(states)})
+    sleep = MagicMock()
+    monkeypatch.setattr(system.time, "sleep", sleep)
+    system.wait_until_unloaded("prod")
+    assert sleep.call_count == 2
+
+
+def test_wait_until_unloaded_gives_up_after_timeout(monkeypatch):
+    monkeypatch.setattr(system, "service_state", lambda t: {"loaded": True})
+    monkeypatch.setattr(system.time, "sleep", MagicMock())
+    system.wait_until_unloaded("prod", timeout=0)
+
+
+def test_stop_service_waits_for_unload(monkeypatch, fake_run):
+    wait = MagicMock()
+    monkeypatch.setattr(system, "wait_until_unloaded", wait)
+    system.stop_service("prod")
+    wait.assert_called_once_with("prod")
+
+
+def test_bootstrap_retries_transient_failure(fake_run, monkeypatch, tmp_path):
+    monkeypatch.setattr(system.time, "sleep", MagicMock())
+    fake_run.side_effect = [
+        subprocess.CompletedProcess([], 5, stdout="", stderr="Input/output error"),
+        subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+    ]
+    system.bootstrap_service(tmp_path / "com.agent.prod.plist")
+    assert fake_run.call_count == 2
+
+
+def test_bootstrap_reports_which_service_failed(fake_run, monkeypatch, tmp_path):
+    monkeypatch.setattr(system.time, "sleep", MagicMock())
+    fake_run.return_value = subprocess.CompletedProcess([], 5, stdout="", stderr="Input/output error")
+    with pytest.raises(system.CommandError) as e:
+        system.bootstrap_service(tmp_path / "com.agent.prod.plist")
+    assert "com.agent.prod.plist" in str(e.value)
+    assert fake_run.call_count == system.BOOTSTRAP_ATTEMPTS
+
+
 def test_memory_percent_is_parsed(fake_run):
     fake_run.return_value = subprocess.CompletedProcess(
         [], 0, stdout="System-wide memory free percentage: 37%\n", stderr=""
@@ -512,6 +553,7 @@ def test_install_stops_on_open_env_permissions(tmp_path, fake_run):
 
 def test_install_registers_services_and_keeps_staging_off(tmp_path, fake_run, monkeypatch):
     repo, root = _prepared(tmp_path)
+    monkeypatch.setattr(install, "wait_until_unloaded", MagicMock())
     (root / "releases" / "a").mkdir(parents=True)
     (root / "prod").symlink_to(root / "releases" / "a")
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
@@ -530,12 +572,26 @@ def test_install_registers_services_and_keeps_staging_off(tmp_path, fake_run, mo
 
 def test_install_creates_first_release_when_prod_is_missing(tmp_path, fake_run, monkeypatch):
     repo, root = _prepared(tmp_path)
+    monkeypatch.setattr(install, "wait_until_unloaded", MagicMock())
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     monkeypatch.setenv("AGENT_STATE_DIR", str(root / "state"))
     initialize = MagicMock(return_value="a" * 40)
     monkeypatch.setattr(install.Deployer, "initialize", initialize)
     assert install.install(repo, root, ref="feat/x") == 0
     initialize.assert_called_once_with("feat/x")
+
+
+def test_reinstall_waits_for_unload_before_registering(tmp_path, fake_run, monkeypatch):
+    repo, root = _prepared(tmp_path)
+    (root / "releases" / "a").mkdir(parents=True)
+    (root / "prod").symlink_to(root / "releases" / "a")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("AGENT_STATE_DIR", str(root / "state"))
+    order = []
+    monkeypatch.setattr(install, "wait_until_unloaded", lambda t: order.append(("wait", t)))
+    monkeypatch.setattr(install, "bootstrap_service", lambda p: order.append(("bootstrap", p.stem)))
+    assert install.install(repo, root) == 0
+    assert order[:2] == [("wait", "prod"), ("bootstrap", "com.agent.prod")]
 
 
 def test_dry_run_changes_nothing(tmp_path, fake_run, monkeypatch, capsys):

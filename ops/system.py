@@ -19,6 +19,10 @@ LABELS = {
 GITHUB_REPOSITORY = "yakinorinori/-Mac-Mini-agent"
 LOG_MAX_BYTES = 5 * 1024 * 1024
 TAIL_READ_BYTES = 64 * 1024
+UNLOAD_TIMEOUT_SECONDS = 15
+UNLOAD_POLL_SECONDS = 0.5
+BOOTSTRAP_ATTEMPTS = 5
+BOOTSTRAP_RETRY_SECONDS = 3
 
 _SECRET_PATTERNS = [
     (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"), "[TELEGRAM_TOKEN]"),
@@ -72,12 +76,35 @@ def service_state(target: str) -> dict:
     }
 
 
+def wait_until_unloaded(target: str, timeout: float = UNLOAD_TIMEOUT_SECONDS):
+    """launchctl bootout は解除の完了を待たずに戻ることがあるので、解除されるまで待つ。"""
+
+    deadline = time.monotonic() + timeout
+
+    while service_state(target)["loaded"] and time.monotonic() < deadline:
+        time.sleep(UNLOAD_POLL_SECONDS)
+
+
 def stop_service(target: str):
     run_command(["launchctl", "bootout", _service(target)], timeout=60)
+    wait_until_unloaded(target)
+
+
+def bootstrap_service(path: Path):
+    """登録する。解除の直後は一時的に失敗することがあるので再試行する。"""
+
+    for attempt in range(1, BOOTSTRAP_ATTEMPTS + 1):
+        try:
+            run_command(["launchctl", "bootstrap", launchd_domain(), str(path)], timeout=60)
+            return
+        except CommandError as e:
+            if attempt == BOOTSTRAP_ATTEMPTS:
+                raise CommandError(f"{path.name} の登録に失敗しました: {e}") from e
+            time.sleep(BOOTSTRAP_RETRY_SECONDS)
 
 
 def start_service(target: str):
-    run_command(["launchctl", "bootstrap", launchd_domain(), str(plist_path(target))], timeout=60)
+    bootstrap_service(plist_path(target))
 
 
 def restart_service(target: str):
@@ -85,7 +112,7 @@ def restart_service(target: str):
 
 
 def start_staging_service():
-    run_command(["launchctl", "bootstrap", launchd_domain(), str(staging_plist_path())], timeout=60)
+    bootstrap_service(staging_plist_path())
 
 
 def stop_staging_service():

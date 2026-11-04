@@ -10,7 +10,14 @@ from pathlib import Path
 
 from agent.process import CommandError, run_command
 from ops.deploy import Deployer, Paths, link_target
-from ops.system import LABELS, launchd_domain, plist_path, staging_plist_path
+from ops.system import (
+    LABELS,
+    bootstrap_service,
+    launchd_domain,
+    plist_path,
+    staging_plist_path,
+    wait_until_unloaded,
+)
 
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 THROTTLE_SECONDS = 30
@@ -77,6 +84,8 @@ def _bootout(target: str):
     except CommandError:
         pass
 
+    wait_until_unloaded(target)
+
 
 def _prepare_state(root: Path):
     state = root / "state"
@@ -120,7 +129,7 @@ def install(ops_repo: Path, root: Path, ref="main", dry_run=False) -> int:
         _bootout(target)
         path.write_bytes(render_plist(target, ops_repo, root))
         run_command(["plutil", "-lint", str(path)], timeout=15)
-        run_command(["launchctl", "bootstrap", launchd_domain(), str(path)], timeout=60)
+        bootstrap_service(path)
         print(f"登録しました: {LABELS[target]}")
 
     (state / "prod.stopped").unlink(missing_ok=True)
