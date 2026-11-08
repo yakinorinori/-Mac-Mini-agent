@@ -115,7 +115,7 @@ def test_close_stops_pending_work():
 
 def _update(text, user_id=USER):
     return SimpleNamespace(
-        message=SimpleNamespace(text=text, reply_text=AsyncMock(), reply_photo=AsyncMock()),
+        message=SimpleNamespace(text=text, chat_id=user_id, reply_text=AsyncMock(), reply_photo=AsyncMock()),
         effective_user=SimpleNamespace(id=user_id),
     )
 
@@ -270,7 +270,8 @@ def test_delayed_run_waits_in_queue_behind_running_job(env, monkeypatch):
         loop = asyncio.get_running_loop()
         await main.receive(_update("先の処理"), None)
         await _until(lambda: calls == ["先の処理"])
-        main._schedule_delayed(plan, message, USER, loop)
+        job_id = main.store.add_scheduled(USER, USER, 0, "あとで", plan)
+        main.schedule_stored(job_id, 1, plan, message, USER, loop)
         await asyncio.to_thread(fired[0])
         assert main.jobs.running_label(USER) == "先の処理"
         env.execute.assert_not_called()

@@ -110,7 +110,7 @@ def test_bot_writes_heartbeat_when_state_dir_is_set(state, monkeypatch):
     monkeypatch.setattr(main, "TOKEN", "123:abc")
 
     async def scenario():
-        app = SimpleNamespace(bot_data={})
+        app = SimpleNamespace(bot_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
         await main._on_start(app)
         await asyncio.sleep(0.05)
         await main._on_stop(app)
@@ -121,7 +121,7 @@ def test_bot_writes_heartbeat_when_state_dir_is_set(state, monkeypatch):
 
 def test_bot_skips_heartbeat_without_state_dir(monkeypatch):
     monkeypatch.delenv("AGENT_STATE_DIR", raising=False)
-    app = SimpleNamespace(bot_data={})
+    app = SimpleNamespace(bot_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
     asyncio.run(main._on_start(app))
     assert app.bot_data == {}
 

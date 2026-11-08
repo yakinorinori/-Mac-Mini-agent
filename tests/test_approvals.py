@@ -51,7 +51,7 @@ def env(monkeypatch, clock):
 
 
 def _message():
-    return SimpleNamespace(text="依頼", reply_text=AsyncMock(), reply_photo=AsyncMock())
+    return SimpleNamespace(text="依頼", chat_id=USER, reply_text=AsyncMock(), reply_photo=AsyncMock())
 
 
 def _text_update(user_id=USER):
