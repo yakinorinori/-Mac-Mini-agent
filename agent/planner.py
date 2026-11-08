@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import re
 import time
@@ -199,13 +200,32 @@ JSONのみ出力してください。"""
     # ── メインロジック ────────────────────────────
 
     def plan(self, intent) -> Plan | None:
+        """計画を作り、経路、モデル、所要時間を付けて返す。"""
+
+        self._route, self._model = "none", ""
+        started = time.monotonic()
+        plan = self._plan(intent)
+
+        if plan is None:
+            return None
+
+        return dataclasses.replace(
+            plan,
+            route=self._route,
+            model=self._model,
+            plan_seconds=round(time.monotonic() - started, 2),
+        )
+
+    def _plan(self, intent) -> Plan | None:
 
         # 「もう一度」は特別処理
         if intent.text.strip() == "もう一度":
+            self._route = "repeat"
             return self.context.get_last_command()
 
         # VS Code宛の引用符付き指示は、中身をLLMに解釈させず直接転送する
         if _is_vscode_chat_request(intent.text):
+            self._route = "rule:vscode"
             print("[Planner] VS Code宛の引用指示を検出 → send_to_vscode_chatへ直接ルーティング")
             return Plan(
                 steps=[
@@ -223,6 +243,7 @@ JSONのみ出力してください。"""
         query = extract_search_query(intent.text)
 
         if query:
+            self._route = "rule:search"
             print("[Planner] 検索指示を検出 → google_searchへ直接ルーティング")
             return Plan(
                 steps=[
@@ -239,6 +260,7 @@ JSONのみ出力してください。"""
 
         # スクリーンショットだけの依頼はLLMを通さない
         if is_screenshot_request(intent.text):
+            self._route = "rule:screenshot"
             print("[Planner] 経路=rule:screenshot LLMなし")
             return Plan(
                 steps=[Step(tool="take_screenshot", reason="スクリーンショットの指示があったため")],
@@ -250,6 +272,7 @@ JSONのみ出力してください。"""
         calendar_args = parse_calendar_request(intent.text)
 
         if calendar_args:
+            self._route = "rule:calendar"
             print("[Planner] 経路=rule:calendar LLMなし")
             return Plan(
                 steps=[Step(tool="calendar_add", args=calendar_args, reason="予定の追加を読み取りました")],
@@ -270,6 +293,7 @@ JSONのみ出力してください。"""
 
         # ② impossible → 即「できません」
         if difficulty == "impossible":
+            self._route = "classify:impossible"
             print("[Planner] impossible → 対応不可")
             return Plan(
                 steps=[],
@@ -279,6 +303,7 @@ JSONのみ出力してください。"""
 
         # 外部APIへの送信は承認フローができるまで行わない
         if difficulty == "api":
+            self._route = "classify:api"
             print("[Planner] api → 外部送信せず対応不可として返す")
             return Plan(
                 steps=[],
@@ -293,11 +318,13 @@ JSONのみ出力してください。"""
             try:
                 plan = self._generate_flow(intent.text, model, tools_description)
                 print(f"[Planner] 経路={route} 所要={time.monotonic() - started:.1f}秒")
+                self._route, self._model = route, model
                 return plan
             except Exception as e:
                 print(f"[Planner] モデル={model} エラー: {e}")
                 last_error = e
 
+        self._route = f"{route}:failed"
         return self._failure_plan(last_error)
 
     def _local_models_for(self, difficulty: str) -> list[str]:

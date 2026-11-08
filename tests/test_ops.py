@@ -464,7 +464,7 @@ def test_every_command_requires_allowed_private_user(monkeypatch):
     commands = [h for h in app.handlers[0] if isinstance(h, CommandHandler)]
     names = {name for h in commands for name in h.commands}
     assert names == {
-        "start", "help", "status", "logs", "stop_prod", "start_prod", "restart",
+        "start", "help", "status", "stats", "logs", "stop_prod", "start_prod", "restart",
         "deploy", "rollback", "deploy_staging", "stop_staging",
     }
 
