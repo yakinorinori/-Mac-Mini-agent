@@ -256,7 +256,10 @@ def test_approval_is_recorded_in_history_only_after_running(env, monkeypatch):
 def test_application_registers_approval_handler(monkeypatch):
     monkeypatch.setattr(main, "TOKEN", "123:abc")
     app = main.build_application()
-    handlers = [h for h in app.handlers[0] if isinstance(h, CallbackQueryHandler)]
+    handlers = [
+        h for h in app.handlers[0]
+        if isinstance(h, CallbackQueryHandler) and h.callback is main.on_approval_decision
+    ]
     assert len(handlers) == 1
     assert handlers[0].pattern.match("approve:x")
     assert handlers[0].pattern.match("reject:x")
