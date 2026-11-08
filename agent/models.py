@@ -1,26 +1,12 @@
 from dataclasses import dataclass, field
 from typing import Dict, Any, Callable, Optional, List, Type
-from datetime import datetime
-from enum import Enum
 
 from pydantic import BaseModel
 
-class MemoryType(str, Enum):
-    EPISODIC = "episodic"   # 実行履歴の要約
-    SEMANTIC = "semantic"   # 恒久的な事実・ルール・好み
-    WORKING = "working"     # 進行中タスクの一時記憶
 
 @dataclass
 class Intent:
     text: str
-
-
-@dataclass
-class Command:
-    tool: str
-    args: Dict[str, Any] = field(default_factory=dict)
-    message: str = ""
-    delay: Optional[int] = None
 
 
 @dataclass

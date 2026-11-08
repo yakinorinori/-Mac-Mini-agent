@@ -38,8 +38,21 @@ def test_context_keeps_last_plan_and_history():
     context.add("スクショ", second)
     assert context.get_last_command() is second
     assert [entry["text"] for entry in context.get_history()] == ["メモ", "スクショ"]
-    assert context.memory.latest()["command"] is second
     assert context.dev_mode is False
+
+
+def test_history_keeps_only_recent_entries():
+    context = Context(history_limit=3)
+    for number in range(5):
+        context.add(f"依頼{number}", Plan(steps=[Step(tool="take_screenshot")]))
+    assert [entry["text"] for entry in context.get_history()] == ["依頼2", "依頼3", "依頼4"]
+
+
+def test_default_history_limit_is_bounded():
+    context = Context()
+    for number in range(100):
+        context.add("依頼", Plan())
+    assert len(context.get_history()) == 20
 
 
 def test_repeat_returns_last_plan_without_llm():
