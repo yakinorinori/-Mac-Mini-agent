@@ -86,8 +86,8 @@ def test_runs_keep_tool_names_only(tmp_path):
     path = tmp_path / "agent.db"
     store = Store(path)
     store.record_run(MAIL, "succeeded", 1.234)
-    assert store.recent_runs() == [{"time": pytest.approx(store.recent_runs()[0]["time"]),
-                                    "tools": ["mail_send"], "status": "succeeded", "seconds": 1.23}]
+    run = store.recent_runs()[0]
+    assert (run["tools"], run["status"], run["seconds"]) == (["mail_send"], "succeeded", 1.23)
     rows = sqlite3.connect(path).execute("SELECT * FROM runs").fetchall()
     assert SECRET not in json.dumps(rows, ensure_ascii=False)
 

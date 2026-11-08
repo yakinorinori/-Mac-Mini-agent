@@ -19,6 +19,7 @@ from config import ALLOWED_TELEGRAM_USER_IDS, TOKEN
 from heartbeat import current_commit, write_heartbeat
 from ops import system
 from ops.deploy import default_paths, is_valid_branch, link_target
+from store import DB_NAME, summarize_runs
 
 MONITOR_INTERVAL_SECONDS = 60
 # 今の本番Botは計画中に処理が止まることがあるので、長めに判定する
@@ -35,6 +36,7 @@ APPROVE = "ops_approve"
 REJECT = "ops_reject"
 
 HELP = """運用コマンド:
+/stats 直近7日の経路ごとの件数と所要時間
 /status 各プロセス、コミット、メモリ、ディスク、CI
 /logs prod|staging|ops|runner|remote-control 直近のログ
 /deploy mainの最新を本番へ反映（承認あり）
@@ -191,6 +193,32 @@ async def monitor_loop(bot):
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP)
+
+
+STATS_DAYS = 7
+
+
+def stats_text(rows) -> str:
+    if not rows:
+        return f"直近{STATS_DAYS}日の記録はありません。"
+
+    lines = [f"直近{STATS_DAYS}日（計画/実行の平均秒数）"]
+
+    for row in rows:
+        model = f" {row['model']}" if row["model"] else ""
+        failed = f" 失敗{row['failed']}" if row["failed"] else ""
+        lines.append(
+            f"{row['route']}{model}: {row['count']}件 "
+            f"計画{row['plan_seconds']:.1f} 実行{row['run_seconds']:.1f}{failed}"
+        )
+
+    return "\n".join(lines)
+
+
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    since = time.time() - STATS_DAYS * 86400
+    rows = await asyncio.to_thread(summarize_runs, system.state_dir() / DB_NAME, since)
+    await update.message.reply_text(stats_text(rows))
 
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -409,6 +437,7 @@ def build_application():
         ("start", show_help),
         ("help", show_help),
         ("status", show_status),
+        ("stats", show_stats),
         ("logs", show_logs),
         ("stop_prod", request_stop),
         ("start_prod", request_start),

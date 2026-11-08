@@ -6,6 +6,7 @@
 """
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -44,6 +45,32 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 """
 
+# 2-2で追加した列。既存のデータベースには起動時に追加する
+_RUN_COLUMNS = {
+    "route": "TEXT NOT NULL DEFAULT ''",
+    "model": "TEXT NOT NULL DEFAULT ''",
+    "plan_seconds": "REAL NOT NULL DEFAULT 0",
+    "text": "TEXT",
+    "text_length": "INTEGER NOT NULL DEFAULT 0",
+}
+
+# 依頼文を残さない条件。メール本文や宛先、開発の指示が入りうるため
+_SENSITIVE_TOOLS = {"mail_send", "send_to_vscode_chat"}
+_SENSITIVE_TEXT = re.compile(r"メール|mail|@|送信|vs ?code|開発", re.IGNORECASE)
+MAX_LOGGED_TEXT = 200
+
+
+def loggable_text(text, plan):
+    """振り分けの分析に使える依頼文だけを返す。本文を含みうる依頼はNoneにする。"""
+
+    if not text or _SENSITIVE_TEXT.search(text):
+        return None
+
+    if plan is not None and any(step.tool in _SENSITIVE_TOOLS for step in plan.steps):
+        return None
+
+    return text[:MAX_LOGGED_TEXT]
+
 
 def plan_to_json(plan: Plan) -> str:
     return json.dumps(asdict(plan), ensure_ascii=False)
@@ -57,6 +84,9 @@ def plan_from_json(data: str) -> Plan:
         message=raw.get("message", ""),
         delay=raw.get("delay"),
         preapproved=raw.get("preapproved", False),
+        route=raw.get("route", ""),
+        model=raw.get("model", ""),
+        plan_seconds=raw.get("plan_seconds", 0.0),
     )
 
 
@@ -77,6 +107,11 @@ class Store:
 
         with self._lock:
             self._db.executescript(_SCHEMA)
+            existing = {row[1] for row in self._db.execute("PRAGMA table_info(runs)")}
+
+            for name, definition in _RUN_COLUMNS.items():
+                if name not in existing:
+                    self._db.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
             self._db.execute(
                 "DELETE FROM runs WHERE time < ?",
                 (self._clock() - RUN_RETENTION_DAYS * 86400,),
@@ -154,18 +189,39 @@ class Store:
 
     # ── 実行記録 ──
 
-    def record_run(self, plan, status, seconds):
-        tools = json.dumps([step.tool for step in plan.steps])
+    def record_run(self, plan, status, seconds, text=None, route=None):
+        """経路、モデル、ツール名、結果、所要時間を記録する。引数は残さない。"""
+
+        steps = plan.steps if plan is not None else []
         self._execute(
-            "INSERT INTO runs (time, tools, status, seconds) VALUES (?, ?, ?, ?)",
-            (self._clock(), tools, status, round(seconds, 2)),
+            "INSERT INTO runs (time, tools, status, seconds, route, model, plan_seconds, text, text_length)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                self._clock(),
+                json.dumps([step.tool for step in steps]),
+                status,
+                round(seconds, 2),
+                route or (plan.route if plan is not None else "") or "none",
+                plan.model if plan is not None else "",
+                round(plan.plan_seconds, 2) if plan is not None else 0,
+                loggable_text(text, plan),
+                len(text or ""),
+            ),
         )
 
     def recent_runs(self, limit=20) -> list[dict]:
         rows = self._execute(
-            "SELECT time, tools, status, seconds FROM runs ORDER BY id DESC LIMIT ?", (limit,),
+            "SELECT time, tools, status, seconds, route, model, plan_seconds, text"
+            " FROM runs ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
-        return [{"time": r[0], "tools": json.loads(r[1]), "status": r[2], "seconds": r[3]} for r in rows]
+        return [
+            {
+                "time": r[0], "tools": json.loads(r[1]), "status": r[2], "seconds": r[3],
+                "route": r[4], "model": r[5], "plan_seconds": r[6], "text": r[7],
+            }
+            for r in rows
+        ]
 
 
 class StoredApprovals:
@@ -182,6 +238,40 @@ class StoredApprovals:
 
     def take(self, approval_id, user_id):
         return self._store.take_approval(approval_id, user_id)
+
+
+def summarize_runs(path, since: float) -> list[dict]:
+    """経路ごとの件数、平均の計画時間と実行時間、失敗数を返す。読み取り専用で開く。"""
+
+    path = Path(path)
+
+    if not path.is_file():
+        return []
+
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
+
+        if "route" not in columns:
+            return []
+
+        rows = connection.execute(
+            "SELECT route, model, COUNT(*), AVG(plan_seconds), AVG(seconds),"
+            " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)"
+            " FROM runs WHERE time >= ? GROUP BY route, model ORDER BY COUNT(*) DESC",
+            (since,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [
+        {
+            "route": r[0], "model": r[1], "count": r[2],
+            "plan_seconds": r[3] or 0, "run_seconds": r[4] or 0, "failed": r[5],
+        }
+        for r in rows
+    ]
 
 
 def open_store(directory) -> Store:

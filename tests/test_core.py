@@ -49,7 +49,8 @@ def test_repeat_returns_last_plan_without_llm():
     assert planner.plan(Intent("もう一度")) is None
     plan = Plan(steps=[Step(tool="take_screenshot")])
     context.add("スクショ", plan)
-    assert planner.plan(Intent("もう一度")) is plan
+    repeated = planner.plan(Intent("もう一度"))
+    assert repeated.steps == plan.steps and repeated.route == "repeat"
 
 
 def test_registry_lookup():

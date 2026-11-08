@@ -39,6 +39,10 @@ class Plan:
     delay: Optional[int] = None
     # ユーザーの明示的な検索指示からコードが作ったPlanだけTrueにする。LLMの出力では設定できない
     preapproved: bool = False
+    # 計測用。Plannerが設定し、LLMの出力では設定できない
+    route: str = ""
+    model: str = ""
+    plan_seconds: float = 0.0
 
     def describe(self) -> str:
         """ユーザーに提示する「使用するツールと操作フロー」のテキストを組み立てる。"""

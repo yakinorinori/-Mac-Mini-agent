@@ -104,33 +104,33 @@ class ChatReplier:
         return await self.bot.send_photo(chat_id=self.chat_id, photo=photo, **kwargs)
 
 
-async def execute_and_record(plan):
-    """ツールを別スレッドで実行し、ツール名と結果だけを記録する。"""
+async def execute_and_record(plan, text=""):
+    """ツールを別スレッドで実行し、経路と結果を記録する。"""
 
     started = time.monotonic()
 
     try:
         results = await asyncio.to_thread(tm.execute_plan, plan)
     except Exception:
-        store.record_run(plan, "failed", time.monotonic() - started)
+        store.record_run(plan, "failed", time.monotonic() - started, text)
         raise
 
-    store.record_run(plan, "succeeded", time.monotonic() - started)
+    store.record_run(plan, "succeeded", time.monotonic() - started, text)
     return results
 
 
-async def run_delayed(plan, message):
+async def run_delayed(plan, message, text=""):
     """遅延実行の処理本体。時刻になるとキューから呼ばれる。"""
 
     try:
-        results = await execute_and_record(plan)
+        results = await execute_and_record(plan, text)
         await send_results(message, plan, results)
     except Exception as e:
         print("エラー:", type(e).__name__)
         await message.reply_text(f"⚠️ 遅延実行でエラーが発生しました: {e}")
 
 
-def schedule_stored(job_id, delay, plan, message, owner, loop):
+def schedule_stored(job_id, delay, plan, message, owner, loop, text=""):
     """時刻になったらキューへ入れるタイマーを登録する。実行中の処理と重ならないようにするため。"""
 
     holder = {}
@@ -143,7 +143,7 @@ def schedule_stored(job_id, delay, plan, message, owner, loop):
             return
 
         async def enqueue():
-            jobs.submit("遅延実行", lambda: run_delayed(plan, message), owner)
+            jobs.submit("遅延実行", lambda: run_delayed(plan, message, text), owner)
 
         try:
             asyncio.run_coroutine_threadsafe(enqueue(), loop).result(timeout=60)
@@ -162,13 +162,13 @@ async def run_plan(message, plan, text, owner):
 
     if plan.delay:
         job_id = store.add_scheduled(owner, message.chat_id, time.time() + plan.delay, text, plan)
-        schedule_stored(job_id, plan.delay, plan, message, owner, asyncio.get_running_loop())
+        schedule_stored(job_id, plan.delay, plan, message, owner, asyncio.get_running_loop(), text)
         # この時点では未実行なので、LLMが用意した完了文面は返さない
         await message.reply_text(
             f"⏰ {plan.delay}秒後に実行します。結果はあとで通知します。/cancel で取り消せます。"
         )
     else:
-        results = await execute_and_record(plan)
+        results = await execute_and_record(plan, text)
         await send_results(message, plan, results)
 
     app_context.add(
@@ -194,7 +194,7 @@ async def restore_scheduled(bot):
             continue
 
         replier = ChatReplier(bot, row["chat_id"])
-        schedule_stored(row["id"], row["run_at"] - now, row["plan"], replier, row["user_id"], loop)
+        schedule_stored(row["id"], row["run_at"] - now, row["plan"], replier, row["user_id"], loop, row["text"])
         restored[row["chat_id"]] = restored.get(row["chat_id"], 0) + 1
 
     for chat_id in set(restored) | set(dropped):
@@ -268,7 +268,14 @@ async def handle_text(update: Update, text: str):
     plan = await asyncio.to_thread(agent.plan, text)
 
     if plan is None:
+        store.record_run(None, "not_understood", 0, text, route=getattr(agent.planner, "_route", "none"))
         await update.message.reply_text("分かりませんでした")
+        return
+
+    if not plan.steps:
+        # 実行するものがない（対応不可やLLMの失敗）。返答だけ送る
+        store.record_run(plan, "no_steps", 0, text)
+        await update.message.reply_text(plan.message or "実行できる操作がありませんでした。")
         return
 
     if plan_requires_approval(plan, tm.registry):
@@ -374,6 +381,7 @@ async def on_approval_decision(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if action != APPROVE:
+        store.record_run(pending.plan, "rejected", 0, pending.text)
         await message.reply_text("🚫 中止しました。実行していません。")
         return
 
