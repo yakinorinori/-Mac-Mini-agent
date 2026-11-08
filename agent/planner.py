@@ -4,7 +4,7 @@ import re
 import time
 from datetime import datetime
 from openai import APIConnectionError, NotFoundError, OpenAI
-from agent.models import Command, Plan, Step
+from agent.models import Plan, Step
 from agent.calendar_rules import parse_calendar_request
 from agent.routing import is_screenshot_request, rule_level
 from agent.schemas import PlanValidationError, build_plan
