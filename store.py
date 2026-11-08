@@ -14,6 +14,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from agent.learned_rules import LEVELS, level_for_model, normalize_key
 from agent.models import Plan, Step
 from approvals import DEFAULT_TTL_SECONDS, PendingApproval
 
@@ -36,6 +37,13 @@ CREATE TABLE IF NOT EXISTS scheduled (
     text TEXT NOT NULL,
     plan TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS learned_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    level TEXT NOT NULL,
+    status TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     time REAL NOT NULL,
@@ -52,6 +60,7 @@ _RUN_COLUMNS = {
     "plan_seconds": "REAL NOT NULL DEFAULT 0",
     "text": "TEXT",
     "text_length": "INTEGER NOT NULL DEFAULT 0",
+    "rule_key": "TEXT",
 }
 
 # 依頼文を残さない条件。メール本文や宛先、開発の指示が入りうるため
@@ -193,9 +202,10 @@ class Store:
         """経路、モデル、ツール名、結果、所要時間を記録する。引数は残さない。"""
 
         steps = plan.steps if plan is not None else []
+        logged = loggable_text(text, plan)
         self._execute(
-            "INSERT INTO runs (time, tools, status, seconds, route, model, plan_seconds, text, text_length)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runs (time, tools, status, seconds, route, model, plan_seconds, text, text_length,"
+            " rule_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 self._clock(),
                 json.dumps([step.tool for step in steps]),
@@ -204,21 +214,106 @@ class Store:
                 route or (plan.route if plan is not None else "") or "none",
                 plan.model if plan is not None else "",
                 round(plan.plan_seconds, 2) if plan is not None else 0,
-                loggable_text(text, plan),
+                logged,
                 len(text or ""),
+                normalize_key(logged),
             ),
         )
 
+    # ── 学習ルール ──
+
+    def rule_candidate(self, key, since, min_successes):
+        """LLMの判定で同じモデルが続けて成功していれば、その難易度を返す。
+
+        失敗、中止、理解できなかった記録が1件でもあれば候補にしない。
+        """
+
+        if not key:
+            return None
+
+        rows = self._execute(
+            "SELECT status, route, model FROM runs WHERE rule_key = ? AND time >= ?",
+            (key, since),
+        ).fetchall()
+
+        if any(status != "succeeded" for status, _, _ in rows):
+            return None
+
+        models = {model for _, route, model in rows if route.startswith("classify:")}
+        count = sum(1 for _, route, _ in rows if route.startswith("classify:"))
+
+        if len(models) != 1 or count < min_successes:
+            return None
+
+        return level_for_model(models.pop())
+
+    def propose_rule(self, key, level):
+        """未提案のキーだけ提案として登録し、そのIDを返す。提案済みや判断済みならNone。"""
+
+        if level not in LEVELS:
+            return None
+
+        cursor = self._execute(
+            "INSERT OR IGNORE INTO learned_rules (key, level, status, updated_at) VALUES (?, ?, 'proposed', ?)",
+            (key, level, self._clock()),
+        )
+        return cursor.lastrowid if cursor.rowcount == 1 else None
+
+    def decide_rule(self, rule_id, accept: bool):
+        """提案中のルールを採用か不採用にし、(キー, 難易度) を返す。提案中でなければNone。"""
+
+        with self._lock:
+            row = self._db.execute(
+                "SELECT key, level FROM learned_rules WHERE id = ? AND status = 'proposed'", (rule_id,),
+            ).fetchone()
+
+            if row is None:
+                return None
+
+            self._db.execute(
+                "UPDATE learned_rules SET status = ?, updated_at = ? WHERE id = ?",
+                ("active" if accept else "declined", self._clock(), rule_id),
+            )
+
+        return row
+
+    def learned_level(self, text):
+        key = normalize_key(text)
+
+        if key is None:
+            return None
+
+        row = self._execute(
+            "SELECT level FROM learned_rules WHERE key = ? AND status = 'active'", (key,),
+        ).fetchone()
+        return row[0] if row and row[0] in LEVELS else None
+
+    def active_rules(self) -> list[dict]:
+        rows = self._execute(
+            "SELECT id, key, level FROM learned_rules WHERE status = 'active' ORDER BY id"
+        ).fetchall()
+        return [{"id": r[0], "key": r[1], "level": r[2]} for r in rows]
+
+    def remove_rule(self, rule_id=None, key=None):
+        """ルールを削除する。削除後は、新しい成功実績が溜まれば再提案される。"""
+
+        if rule_id is not None:
+            cursor = self._execute("DELETE FROM learned_rules WHERE id = ? AND status = 'active'", (rule_id,))
+        else:
+            cursor = self._execute("DELETE FROM learned_rules WHERE key = ? AND status = 'active'", (key,))
+
+        return cursor.rowcount == 1
+
     def recent_runs(self, limit=20) -> list[dict]:
         rows = self._execute(
-            "SELECT time, tools, status, seconds, route, model, plan_seconds, text"
+            "SELECT time, tools, status, seconds, route, model, plan_seconds, text, rule_key"
             " FROM runs ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [
             {
                 "time": r[0], "tools": json.loads(r[1]), "status": r[2], "seconds": r[3],
-                "route": r[4], "model": r[5], "plan_seconds": r[6], "text": r[7],
+                "route": r[4], "model": r[5], "plan_seconds": r[6], "text": r[7], "rule_key": r[8],
             }
             for r in rows
         ]

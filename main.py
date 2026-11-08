@@ -16,18 +16,19 @@ from telegram.ext import (
 from approvals import DEFAULT_TTL_SECONDS
 from config import ALLOWED_TELEGRAM_USER_IDS, TOKEN
 from agent.agent import Agent
+from agent.learned_rules import MIN_SUCCESSES, WINDOW_DAYS, normalize_key
 from agent.executor import ToolManager
 from agent.schemas import plan_requires_approval
 from context import Context
 from heartbeat import INTERVAL_SECONDS, current_commit, state_dir, write_heartbeat
 from jobs import JobQueue
 from scheduler import Scheduler
-from store import StoredApprovals, open_store
+from store import StoredApprovals, loggable_text, open_store
 from tools.vscode.send_chat import open_dev_mode, type_into_vscode_chat, submit_vscode_chat
 
 tm = ToolManager()
 app_context = Context()
-agent = Agent(app_context, registry=tm.registry)
+agent = Agent(app_context, registry=tm.registry, rule_lookup=lambda text: store.learned_level(text))
 scheduler = Scheduler()
 store = open_store(state_dir())
 approvals = StoredApprovals(store)
@@ -104,7 +105,51 @@ class ChatReplier:
         return await self.bot.send_photo(chat_id=self.chat_id, photo=photo, **kwargs)
 
 
-async def execute_and_record(plan, text=""):
+def _rule_key(plan, text):
+    return normalize_key(loggable_text(text, plan))
+
+
+async def forget_learned_rule(plan, text, message):
+    """学習ルールで振り分けた依頼が失敗や中止になったら、そのルールを外す。"""
+
+    if not plan.route.startswith("learned:"):
+        return
+
+    key = _rule_key(plan, text)
+
+    if key and store.remove_rule(key=key):
+        await message.reply_text(f"🧠 学習ルール「{key}」を外しました。次からは通常の判定に戻します。")
+
+
+async def maybe_propose_rule(plan, text, message):
+    """LLMの判定で同じモデルが続けて成功した依頼を、ルールとして提案する。"""
+
+    if not plan.route.startswith("classify:"):
+        return
+
+    key = _rule_key(plan, text)
+    level = store.rule_candidate(key, time.time() - WINDOW_DAYS * 86400, MIN_SUCCESSES)
+
+    if level is None:
+        return
+
+    rule_id = store.propose_rule(key, level)
+
+    if rule_id is None:
+        return
+
+    buttons = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ 追加", callback_data=f"rule_yes:{rule_id}"),
+        InlineKeyboardButton("🚫 追加しない", callback_data=f"rule_no:{rule_id}"),
+    ]])
+    await message.reply_text(
+        f"🧠 「{key}」は直近{WINDOW_DAYS}日に {plan.model} で{MIN_SUCCESSES}回以上成功しました。\n"
+        f"次から難易度の判定を省き、{plan.model} で計画しますか？（承認が必要な操作は今までどおり確認します）",
+        reply_markup=buttons,
+    )
+
+
+async def execute_and_record(plan, text="", message=None):
     """ツールを別スレッドで実行し、経路と結果を記録する。"""
 
     started = time.monotonic()
@@ -113,6 +158,8 @@ async def execute_and_record(plan, text=""):
         results = await asyncio.to_thread(tm.execute_plan, plan)
     except Exception:
         store.record_run(plan, "failed", time.monotonic() - started, text)
+        if message is not None:
+            await forget_learned_rule(plan, text, message)
         raise
 
     store.record_run(plan, "succeeded", time.monotonic() - started, text)
@@ -123,7 +170,7 @@ async def run_delayed(plan, message, text=""):
     """遅延実行の処理本体。時刻になるとキューから呼ばれる。"""
 
     try:
-        results = await execute_and_record(plan, text)
+        results = await execute_and_record(plan, text, message)
         await send_results(message, plan, results)
     except Exception as e:
         print("エラー:", type(e).__name__)
@@ -168,8 +215,9 @@ async def run_plan(message, plan, text, owner):
             f"⏰ {plan.delay}秒後に実行します。結果はあとで通知します。/cancel で取り消せます。"
         )
     else:
-        results = await execute_and_record(plan, text)
+        results = await execute_and_record(plan, text, message)
         await send_results(message, plan, results)
+        await maybe_propose_rule(plan, text, message)
 
     app_context.add(
         text,
@@ -383,6 +431,7 @@ async def on_approval_decision(update: Update, context: ContextTypes.DEFAULT_TYP
     if action != APPROVE:
         store.record_run(pending.plan, "rejected", 0, pending.text)
         await message.reply_text("🚫 中止しました。実行していません。")
+        await forget_learned_rule(pending.plan, pending.text, message)
         return
 
     ahead = jobs.submit(
@@ -432,6 +481,48 @@ async def _on_stop(app):
     scheduled_timers.clear()
 
 
+async def on_rule_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ルール提案と削除のボタンを処理する。"""
+
+    query = update.callback_query
+
+    if update.effective_user.id not in ALLOWED_TELEGRAM_USER_IDS:
+        await query.answer()
+        return
+
+    await _acknowledge(query)
+    action, _, raw_id = query.data.partition(":")
+    rule_id = int(raw_id)
+
+    if action == "rule_del":
+        removed = store.remove_rule(rule_id=rule_id)
+        await query.message.reply_text("🗑 ルールを削除しました。" if removed else "このルールはもうありません。")
+        return
+
+    decided = store.decide_rule(rule_id, accept=action == "rule_yes")
+
+    if decided is None:
+        await query.message.reply_text("この提案はすでに処理済みです。")
+    elif action == "rule_yes":
+        await query.message.reply_text(f"✅ 「{decided[0]}」のルールを追加しました。/rules で確認、削除できます。")
+    else:
+        await query.message.reply_text("🚫 追加しませんでした。この依頼は今後も提案しません。")
+
+
+async def show_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rules = store.active_rules()
+
+    if not rules:
+        await update.message.reply_text("学習ルールはありません。")
+        return
+
+    for rule in rules:
+        buttons = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🗑 削除", callback_data=f"rule_del:{rule['id']}"),
+        ]])
+        await update.message.reply_text(f"「{rule['key']}」→ {rule['level']}", reply_markup=buttons)
+
+
 def build_application():
 
     app = (
@@ -448,6 +539,10 @@ def build_application():
     app.add_handler(
         CommandHandler("cancel", cancel, filters=build_user_filter(ALLOWED_TELEGRAM_USER_IDS))
     )
+    app.add_handler(
+        CommandHandler("rules", show_rules, filters=build_user_filter(ALLOWED_TELEGRAM_USER_IDS))
+    )
+    app.add_handler(CallbackQueryHandler(on_rule_decision, pattern=r"^rule_(yes|no|del):[1-9][0-9]{0,9}$"))
     app.add_handler(
         CallbackQueryHandler(on_approval_decision, pattern=f"^({APPROVE}|{REJECT}):")
     )

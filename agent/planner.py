@@ -55,10 +55,12 @@ def extract_search_query(text: str) -> str | None:
 
 class Planner:
 
-    def __init__(self, context, registry=None):
+    def __init__(self, context, registry=None, rule_lookup=None):
 
         self.context = context
         self.registry = registry
+        # 承認済みの学習ルールを引く関数。依頼文を受け取り、難易度かNoneを返す
+        self.rule_lookup = rule_lookup
         self._ollama_client = None
 
     # ── クライアント ──────────────────────────────
@@ -286,6 +288,10 @@ JSONのみ出力してください。"""
         # ① 単純な依頼はルールで決め、それ以外はLLMで難易度を分類
         difficulty = rule_level(intent.text)
         route = f"rule:{difficulty}"
+
+        if difficulty is None and self.rule_lookup is not None:
+            difficulty = self.rule_lookup(intent.text)
+            route = f"learned:{difficulty}"
 
         if difficulty is None:
             difficulty = self._classify(intent.text, tools_description)
