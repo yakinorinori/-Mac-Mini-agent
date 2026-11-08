@@ -223,7 +223,7 @@ def test_execute_plan_reports_failed_and_completed_steps():
 
 def _telegram_update():
     return SimpleNamespace(
-        message=SimpleNamespace(text="依頼", reply_text=AsyncMock(), reply_photo=AsyncMock()),
+        message=SimpleNamespace(text="依頼", chat_id=ALLOWED_ID, reply_text=AsyncMock(), reply_photo=AsyncMock()),
         effective_user=SimpleNamespace(id=ALLOWED_ID),
     )
 

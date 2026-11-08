@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TimedOut
@@ -12,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-from approvals import DEFAULT_TTL_SECONDS, ApprovalStore
+from approvals import DEFAULT_TTL_SECONDS
 from config import ALLOWED_TELEGRAM_USER_IDS, TOKEN
 from agent.agent import Agent
 from agent.executor import ToolManager
@@ -21,13 +22,15 @@ from context import Context
 from heartbeat import INTERVAL_SECONDS, current_commit, state_dir, write_heartbeat
 from jobs import JobQueue
 from scheduler import Scheduler
+from store import StoredApprovals, open_store
 from tools.vscode.send_chat import open_dev_mode, type_into_vscode_chat, submit_vscode_chat
 
 tm = ToolManager()
 app_context = Context()
 agent = Agent(app_context, registry=tm.registry)
 scheduler = Scheduler()
-approvals = ApprovalStore()
+store = open_store(state_dir())
+approvals = StoredApprovals(store)
 jobs = JobQueue()
 scheduled_timers = {}
 
@@ -38,6 +41,9 @@ PHOTO_TIMEOUT_SECONDS = 60
 MAX_MESSAGE_LENGTH = 4000
 
 LABEL_LENGTH = 30
+
+# 停止中にこれより長く実行時刻を過ぎた予約は、古すぎるので実行しない
+LATE_LIMIT_SECONDS = 60 * 60
 
 APPROVE = "approve"
 REJECT = "reject"
@@ -84,24 +90,57 @@ async def send_results(message, plan, results):
     await message.reply_text(plan.message or "完了しました。")
 
 
+class ChatReplier:
+    """再起動後に元のメッセージがなくても、同じチャットへ返信できるようにする。"""
+
+    def __init__(self, bot, chat_id):
+        self.bot = bot
+        self.chat_id = chat_id
+
+    async def reply_text(self, text, **kwargs):
+        return await self.bot.send_message(chat_id=self.chat_id, text=text, **kwargs)
+
+    async def reply_photo(self, photo, **kwargs):
+        return await self.bot.send_photo(chat_id=self.chat_id, photo=photo, **kwargs)
+
+
+async def execute_and_record(plan):
+    """ツールを別スレッドで実行し、ツール名と結果だけを記録する。"""
+
+    started = time.monotonic()
+
+    try:
+        results = await asyncio.to_thread(tm.execute_plan, plan)
+    except Exception:
+        store.record_run(plan, "failed", time.monotonic() - started)
+        raise
+
+    store.record_run(plan, "succeeded", time.monotonic() - started)
+    return results
+
+
 async def run_delayed(plan, message):
     """遅延実行の処理本体。時刻になるとキューから呼ばれる。"""
 
     try:
-        results = await asyncio.to_thread(tm.execute_plan, plan)
+        results = await execute_and_record(plan)
         await send_results(message, plan, results)
     except Exception as e:
         print("エラー:", type(e).__name__)
         await message.reply_text(f"⚠️ 遅延実行でエラーが発生しました: {e}")
 
 
-def _schedule_delayed(plan, message, owner, loop):
+def schedule_stored(job_id, delay, plan, message, owner, loop):
     """時刻になったらキューへ入れるタイマーを登録する。実行中の処理と重ならないようにするため。"""
 
     holder = {}
 
     def fire():
         scheduled_timers.pop(holder.get("timer"), None)
+
+        # /cancel 済みなら実行しない
+        if not store.claim_scheduled(job_id):
+            return
 
         async def enqueue():
             jobs.submit("遅延実行", lambda: run_delayed(plan, message), owner)
@@ -111,7 +150,7 @@ def _schedule_delayed(plan, message, owner, loop):
         except Exception as e:
             print("遅延実行の登録エラー:", type(e).__name__)
 
-    timer = scheduler.schedule(plan.delay, fire)
+    timer = scheduler.schedule(max(0, delay), fire)
 
     if timer is not None:
         holder["timer"] = timer
@@ -122,19 +161,55 @@ async def run_plan(message, plan, text, owner):
     """Planを実行、または遅延実行を予約する。"""
 
     if plan.delay:
-        _schedule_delayed(plan, message, owner, asyncio.get_running_loop())
+        job_id = store.add_scheduled(owner, message.chat_id, time.time() + plan.delay, text, plan)
+        schedule_stored(job_id, plan.delay, plan, message, owner, asyncio.get_running_loop())
         # この時点では未実行なので、LLMが用意した完了文面は返さない
         await message.reply_text(
             f"⏰ {plan.delay}秒後に実行します。結果はあとで通知します。/cancel で取り消せます。"
         )
     else:
-        results = await asyncio.to_thread(tm.execute_plan, plan)
+        results = await execute_and_record(plan)
         await send_results(message, plan, results)
 
     app_context.add(
         text,
         plan
     )
+
+
+async def restore_scheduled(bot):
+    """再起動前の予約を戻す。実行時刻を大きく過ぎたものは実行せずに知らせる。"""
+
+    loop = asyncio.get_running_loop()
+    now = time.time()
+    restored = {}
+    dropped = {}
+
+    for row in store.list_scheduled():
+        late = now - row["run_at"]
+
+        if late > LATE_LIMIT_SECONDS:
+            store.claim_scheduled(row["id"])
+            dropped[row["chat_id"]] = dropped.get(row["chat_id"], 0) + 1
+            continue
+
+        replier = ChatReplier(bot, row["chat_id"])
+        schedule_stored(row["id"], row["run_at"] - now, row["plan"], replier, row["user_id"], loop)
+        restored[row["chat_id"]] = restored.get(row["chat_id"], 0) + 1
+
+    for chat_id in set(restored) | set(dropped):
+        lines = []
+
+        if restored.get(chat_id):
+            lines.append(f"⏰ 再起動前の予約を{restored[chat_id]}件引き継ぎました。/cancel で取り消せます。")
+
+        if dropped.get(chat_id):
+            lines.append(f"⚠️ 停止中に実行時刻を1時間以上過ぎた予約を{dropped[chat_id]}件取り消しました。")
+
+        try:
+            await bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        except Exception as e:
+            print("通知エラー:", type(e).__name__)
 
 
 async def request_approval(update: Update, plan, text):
@@ -246,8 +321,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         timer.cancel()
         scheduled_timers.pop(timer, None)
 
-    if timers:
-        cancelled += [f"遅延実行 {len(timers)}件"]
+    removed = store.cancel_scheduled(owner)
+
+    if removed:
+        cancelled += [f"遅延実行 {removed}件"]
 
     lines = [f"🚫 取り消しました: {label}" for label in cancelled] or ["取り消せる処理はありません。"]
     running = jobs.running_label(owner)
@@ -330,6 +407,8 @@ async def _on_start(app):
     if directory:
         name = os.getenv("AGENT_NAME", "prod")
         app.bot_data["heartbeat"] = asyncio.create_task(heartbeat_loop(directory, name))
+
+    await restore_scheduled(app.bot)
 
 
 async def _on_stop(app):
