@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TimedOut
@@ -26,6 +27,7 @@ from heartbeat import INTERVAL_SECONDS, current_commit, state_dir, write_heartbe
 from jobs import JobQueue
 from scheduler import Scheduler
 from store import StoredApprovals, loggable_text, open_store
+import speech
 import voice
 from tools.vscode.send_chat import open_dev_mode, type_into_vscode_chat, submit_vscode_chat
 
@@ -51,6 +53,14 @@ LATE_LIMIT_SECONDS = 60 * 60
 
 # 音声メモの上限。長い録音は文字起こしに時間がかかり、他の依頼を待たせるため
 MAX_VOICE_SECONDS = 120
+
+# 音声メモへの返答を読み上げるか(/voice で切り替え、再起動後も保つ)
+VOICE_REPLY_SETTING = "voice_reply"
+
+# 読み上げない返信(途中経過、文字起こしの表示、操作フロー、学習ルールの提案)
+SILENT_PREFIXES = ("⏳", "📥", "🎙", "🔧", "🧠")
+APPROVAL_QUESTION = "この内容で実行しますか"
+SPOKEN_APPROVAL = "実行してよいか、ボタンで確認してください。"
 
 APPROVE = "approve"
 REJECT = "reject"
@@ -101,6 +111,79 @@ async def send_results(message, plan, results):
                     return
 
     await message.reply_text(plan.message or "完了しました。")
+
+
+class RecordingMessage:
+    """返信をそのまま送りつつ、読み上げる文章を記録する。"""
+
+    def __init__(self, message):
+        self._message = message
+        self.spoken = []
+
+    def __getattr__(self, name):
+        return getattr(self._message, name)
+
+    async def reply_text(self, text, **kwargs):
+        part = spoken_part(text, kwargs.get("reply_markup"))
+
+        if part:
+            self.spoken.append(part)
+
+        return await self._message.reply_text(text, **kwargs)
+
+
+def spoken_part(text, reply_markup=None):
+    """返信のうち読み上げる部分を返す。読み上げないものは None。"""
+
+    if reply_markup is not None:
+        # 承認ボタンは操作内容が長いので、確認を促す一言だけにする
+        return SPOKEN_APPROVAL if APPROVAL_QUESTION in text else None
+
+    if text.startswith(SILENT_PREFIXES):
+        return None
+
+    return text
+
+
+def voice_reply_enabled():
+    return store.get_setting(VOICE_REPLY_SETTING, "on") == "on"
+
+
+async def reply_with_speech(message, texts):
+    """記録した返信を読み上げ、音声メッセージで送る。"""
+
+    if not texts or not voice_reply_enabled():
+        return
+
+    text = speech.speakable("\n".join(texts))
+
+    if not text:
+        return
+
+    problems = speech.setup_problems()
+
+    if problems:
+        await message.reply_text("🔇 読み上げが未導入です: " + "、".join(problems))
+        return
+
+    started = time.monotonic()
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="agent-speech-") as directory:
+            ogg = await asyncio.to_thread(speech.synthesize, text, Path(directory))
+
+            with open(ogg, "rb") as audio:
+                await message.reply_voice(
+                    audio,
+                    read_timeout=PHOTO_TIMEOUT_SECONDS,
+                    write_timeout=PHOTO_TIMEOUT_SECONDS,
+                )
+    except Exception as e:
+        print("読み上げエラー:", type(e).__name__)
+        await message.reply_text(f"🔇 読み上げに失敗しました: {e}")
+        return
+
+    print(f"読み上げ: {len(text)}文字、{time.monotonic() - started:.1f}秒")
 
 
 class ChatReplier:
@@ -424,7 +507,13 @@ async def process_voice(update: Update):
         return
 
     await update.message.reply_text(f"🎙 「{text}」（文字起こし {seconds:.1f}秒）")
-    await process_text(update, text, from_voice=True)
+
+    # 返信を記録し、処理の後でまとめて読み上げる
+    recorder = RecordingMessage(update.message)
+    await process_text(
+        SimpleNamespace(message=recorder, effective_user=update.effective_user), text, from_voice=True
+    )
+    await reply_with_speech(update.message, recorder.spoken)
 
 
 async def receive_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -450,6 +539,24 @@ async def receive_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"📥 受け付けました（前に{ahead}件）。/cancel で未開始の処理を取り消せます。"
         )
+
+
+async def toggle_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/voice で切り替え、/voice on または /voice off で指定する。"""
+
+    args = [arg.lower() for arg in (context.args or [])] if context else []
+
+    if args and args[0] in ("on", "off"):
+        enabled = args[0] == "on"
+    else:
+        enabled = not voice_reply_enabled()
+
+    store.set_setting(VOICE_REPLY_SETTING, "on" if enabled else "off")
+
+    if enabled:
+        await update.message.reply_text("🔊 音声メモへの返答を読み上げます。/voice で切り替えられます。")
+    else:
+        await update.message.reply_text("🔇 読み上げをやめ、文字だけで返します。/voice で切り替えられます。")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -628,6 +735,9 @@ def build_application():
     )
     app.add_handler(
         CommandHandler("cancel", cancel, filters=build_user_filter(ALLOWED_TELEGRAM_USER_IDS))
+    )
+    app.add_handler(
+        CommandHandler("voice", toggle_voice_reply, filters=build_user_filter(ALLOWED_TELEGRAM_USER_IDS))
     )
     app.add_handler(
         CommandHandler("rules", show_rules, filters=build_user_filter(ALLOWED_TELEGRAM_USER_IDS))
