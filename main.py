@@ -1,6 +1,8 @@
 import asyncio
 import os
+import tempfile
 import time
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TimedOut
@@ -24,6 +26,7 @@ from heartbeat import INTERVAL_SECONDS, current_commit, state_dir, write_heartbe
 from jobs import JobQueue
 from scheduler import Scheduler
 from store import StoredApprovals, loggable_text, open_store
+import voice
 from tools.vscode.send_chat import open_dev_mode, type_into_vscode_chat, submit_vscode_chat
 
 tm = ToolManager()
@@ -46,6 +49,9 @@ LABEL_LENGTH = 30
 # 停止中にこれより長く実行時刻を過ぎた予約は、古すぎるので実行しない
 LATE_LIMIT_SECONDS = 60 * 60
 
+# 音声メモの上限。長い録音は文字起こしに時間がかかり、他の依頼を待たせるため
+MAX_VOICE_SECONDS = 120
+
 APPROVE = "approve"
 REJECT = "reject"
 
@@ -64,6 +70,12 @@ def build_message_filter(allowed_user_ids):
     """コマンドを除くテキストを受け付けるフィルタを作る。"""
 
     return build_user_filter(allowed_user_ids) & filters.TEXT & ~filters.COMMAND
+
+
+def build_voice_filter(allowed_user_ids):
+    """音声メモを受け付けるフィルタを作る。"""
+
+    return build_user_filter(allowed_user_ids) & filters.VOICE
 
 
 async def send_results(message, plan, results):
@@ -283,10 +295,11 @@ async def request_approval(update: Update, plan, text):
     await update.message.reply_text(chunks[-1], reply_markup=buttons)
 
 
-async def handle_text(update: Update, text: str):
+async def handle_text(update: Update, text: str, from_voice=False):
 
     # ── 開発モード ──────────────────────────────
-    if text.strip() == "開発モード":
+    # 操作の語(開発モード、送信、終了)は入力した文字だけで受け付ける。聞き間違いで送信しないため
+    if not from_voice and text.strip() == "開発モード":
         await asyncio.to_thread(open_dev_mode)
         app_context.dev_mode = True
         await update.message.reply_text(
@@ -296,6 +309,13 @@ async def handle_text(update: Update, text: str):
         return
 
     if app_context.dev_mode:
+
+        if from_voice:
+            await asyncio.to_thread(type_into_vscode_chat, text)
+            await update.message.reply_text(
+                "VS Codeのチャット欄に入力しました。送信と終了は文字で送ってください。"
+            )
+            return
 
         if text.strip() == "終了":
             app_context.dev_mode = False
@@ -337,10 +357,10 @@ async def handle_text(update: Update, text: str):
     await run_plan(update.message, plan, text, update.effective_user.id)
 
 
-async def process_text(update: Update, text: str):
+async def process_text(update: Update, text: str, from_voice=False):
 
     try:
-        await handle_text(update, text)
+        await handle_text(update, text, from_voice)
     except Exception as e:
         print("エラー:", type(e).__name__)
         await update.message.reply_text(f"⚠️ エラーが発生しました: {e}")
@@ -356,6 +376,73 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ahead = jobs.submit(
         text[:LABEL_LENGTH],
         lambda: process_text(update, text),
+        update.effective_user.id,
+    )
+
+    if ahead:
+        await update.message.reply_text(
+            f"📥 受け付けました（前に{ahead}件）。/cancel で未開始の処理を取り消せます。"
+        )
+
+
+async def transcribe_message(message):
+    """音声メモを一時フォルダへ保存して文字起こしし、フォルダごと消す。"""
+
+    with tempfile.TemporaryDirectory(prefix="agent-voice-") as directory:
+        audio = Path(directory) / "voice.oga"
+        file = await message.voice.get_file()
+        await file.download_to_drive(audio)
+
+        return await asyncio.to_thread(voice.transcribe, audio, Path(directory))
+
+
+async def process_voice(update: Update):
+
+    problems = voice.setup_problems()
+
+    if problems:
+        await update.message.reply_text(
+            "🎙 音声認識が未導入です: " + "、".join(problems)
+            + "\nMac miniで python -m voice --check を実行して確認してください。"
+        )
+        return
+
+    started = time.monotonic()
+
+    try:
+        text = await transcribe_message(update.message)
+    except Exception as e:
+        print("文字起こしエラー:", type(e).__name__)
+        await update.message.reply_text(f"⚠️ 文字起こしに失敗しました: {e}")
+        return
+
+    seconds = time.monotonic() - started
+    print(f"文字起こし: {len(text)}文字、{seconds:.1f}秒")
+
+    if not text:
+        await update.message.reply_text(f"🎙 聞き取れませんでした（{seconds:.1f}秒）。")
+        return
+
+    await update.message.reply_text(f"🎙 「{text}」（文字起こし {seconds:.1f}秒）")
+    await process_text(update, text, from_voice=True)
+
+
+async def receive_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """音声メモをキューへ入れる。文字起こしもLLMと同じく1件ずつ実行する。"""
+
+    duration = update.message.voice.duration or 0
+
+    if duration > MAX_VOICE_SECONDS:
+        await update.message.reply_text(
+            f"🎙 音声は{MAX_VOICE_SECONDS}秒までです（{duration}秒）。短く分けて送ってください。"
+        )
+        return
+
+    print(f"受信: 音声{duration}秒")
+
+    ahead = jobs.submit(
+        f"音声メモ（{duration}秒）",
+        lambda: process_voice(update),
         update.effective_user.id,
     )
 
@@ -535,6 +622,9 @@ def build_application():
 
     app.add_handler(
         MessageHandler(build_message_filter(ALLOWED_TELEGRAM_USER_IDS), receive)
+    )
+    app.add_handler(
+        MessageHandler(build_voice_filter(ALLOWED_TELEGRAM_USER_IDS), receive_voice)
     )
     app.add_handler(
         CommandHandler("cancel", cancel, filters=build_user_filter(ALLOWED_TELEGRAM_USER_IDS))
