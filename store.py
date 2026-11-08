@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS learned_rules (
     status TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     time REAL NOT NULL,
@@ -303,6 +307,17 @@ class Store:
             cursor = self._execute("DELETE FROM learned_rules WHERE key = ? AND status = 'active'", (key,))
 
         return cursor.rowcount == 1
+
+    def get_setting(self, key, default=None):
+        row = self._execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key, value):
+        self._execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, str(value)),
+        )
 
     def recent_runs(self, limit=20) -> list[dict]:
         rows = self._execute(
